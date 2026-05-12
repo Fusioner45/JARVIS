@@ -311,6 +311,7 @@ class ArcReactor(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         center = self.rect().center()
+        center_f = center.toPointF()
 
         # Calcul du pulse
         if self.is_thinking:
@@ -321,7 +322,7 @@ class ArcReactor(QWidget):
         dynamic_radius = self.glow_radius + (15 * np.sin(self.pulse_val))
 
         # Gradient pour l'effet Arc Reactor
-        gradient = QRadialGradient(center, dynamic_radius)
+        gradient = QRadialGradient(center_f, dynamic_radius)
         if self.is_thinking:
             gradient.setColorAt(0, QColor(255, 0, 255, 200)) # Magenta quand il réfléchit
         else:
