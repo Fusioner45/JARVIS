@@ -20,21 +20,63 @@ import sys
 import io
 import json
 import re
+import sqlite3
 import threading
 import time
 from collections import deque
-from typing import AsyncGenerator, List
+from typing import AsyncGenerator, List, Dict
 
 import numpy as np
 from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QGraphicsDropShadowEffect
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QPropertyAnimation, QEasingCurve, QPointF, QRectF
 from PyQt6.QtGui import QColor, QPalette, QFont, QPainter, QRadialGradient, QPen, QBrush
+import webbrowser
+import os
 import sounddevice as sd
 import torch
 from faster_whisper import WhisperModel
 import aiohttp
 import edge_tts
 from pydub import AudioSegment  # décodage MP3 → PCM
+
+# ----------------------------------------------------------------------
+# Persistence: SQLite Memory Core
+# ----------------------------------------------------------------------
+class JarvisMemory:
+    def __init__(self, db_path="memory.db"):
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fact_type TEXT,
+                    content TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+
+    def save_memory(self, fact_type: str, content: str):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO memory (fact_type, content) VALUES (?, ?)", (fact_type, content))
+            conn.commit()
+            log.info(f"🧠 Mémoire sauvegardée : [{fact_type}] {content}")
+
+    def query_memory(self, search_term: str) -> List[str]:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT content FROM memory WHERE content LIKE ? OR fact_type LIKE ?",
+                                 (f"%{search_term}%", f"%{search_term}%"))
+            return [row[0] for row in cursor.fetchall()]
+
+    def get_all_context(self) -> str:
+        """Récupère un résumé de tous les faits pour le prompt système."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT fact_type, content FROM memory ORDER BY timestamp DESC LIMIT 20")
+            facts = [f"- {ft}: {c}" for ft, c in cursor.fetchall()]
+            return "\n".join(facts) if facts else "Aucun fait mémorisé pour le moment."
 
 # ----------------------------------------------------------------------
 # Configuration (à adapter si besoin)
@@ -153,7 +195,7 @@ class SpeechToText:
                 audio_np,
                 language="fr",
                 task="transcribe",
-                initial_prompt="Bonjour, je suis Jarvis. Je parle français.",
+                initial_prompt="Ceci est une dictée en français. L'utilisateur parle de programmation, de menuiserie à Issoire et de révisions de cours. Ne pas traduire en anglais.",
                 beam_size=5,
                 best_of=5,
                 vad_filter=False,  # on fait notre propre VAD en amont
@@ -293,51 +335,55 @@ class TextToSpeech:
 
 
 # ----------------------------------------------------------------------
-# UI PyQt6 - Cyberpunk HUD (Iron Man Style)
+# UI PyQt6 - Cyberpunk HUD (Stark/Iron Man Style)
 # ----------------------------------------------------------------------
 class ArcReactor(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(500, 600)
+        self.resize(600, 700)
 
-        # Effet Glassmorphism pour le widget principal (optionnel visuellement sur fond transparent)
+        # Glassmorphism
         self.setStyleSheet("""
             QWidget {
                 background-color: rgba(0, 20, 40, 0.4);
-                border-radius: 20px;
-                border: 1px solid rgba(0, 242, 255, 0.3);
+                border-radius: 30px;
+                border: 2px solid rgba(0, 242, 255, 0.2);
             }
         """)
 
         # Layout
         layout = QVBoxLayout(self)
-        layout.addSpacing(400) # Laisser la place pour l'Arc Reactor
+        layout.addSpacing(450)
 
-        self.label = QLabel("INITIALIZING...", self)
-        font = QFont("OCR A Extended", 14)
-        if font.family() == "": font = QFont("Consolas", 14)
+        self.label = QLabel("SYSTEM ONLINE", self)
+        # Typographie militaire
+        font = QFont("OCR A Extended", 12)
+        if font.family() == "OCR A Extended": pass
+        else: font = QFont("Consolas", 12)
+
         self.label.setFont(font)
-        self.label.setStyleSheet("color: #00f2ff; background: transparent; border: none;")
+        self.label.setStyleSheet("color: #00f2ff; background: transparent; border: none; padding: 20px;")
         self.label.setWordWrap(True)
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
         layout.addWidget(self.label)
 
-        # Paramètres d'animation
-        self.angle = 0
-        self.pulse = 0
+        # Animation parameters
+        self.angle_outer = 0
+        self.pulse_inner = 0
         self.is_thinking = False
         self.target_text = ""
         self.current_text = ""
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.animate)
-        self.timer.start(30)
+        self.timer.start(20) # 50 FPS
 
     def animate(self):
-        self.angle = (self.angle + (5 if self.is_thinking else 2)) % 360
-        self.pulse += 0.1
+        # Rotation ring
+        self.angle_outer = (self.angle_outer + (4 if self.is_thinking else 1)) % 360
+        self.pulse_inner += 0.15 if self.is_thinking else 0.05
 
         # Typewriter effect
         if len(self.current_text) < len(self.target_text):
@@ -350,46 +396,51 @@ class ArcReactor(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        center = QPointF(self.width() / 2, 200)
+        center = QPointF(self.width() / 2, 250)
 
-        # Draw Global Glow manually
-        glow_gradient = QRadialGradient(center, 250)
-        glow_gradient.setColorAt(0, QColor(0, 242, 255, 40))
-        glow_gradient.setColorAt(1, Qt.GlobalColor.transparent)
-        painter.setBrush(QBrush(glow_gradient))
+        # 1. Global Neon Glow
+        glow = QRadialGradient(center, 300)
+        glow.setColorAt(0, QColor(0, 242, 255, 30))
+        glow.setColorAt(1, Qt.GlobalColor.transparent)
+        painter.setBrush(QBrush(glow))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(center, 250, 250)
+        painter.drawEllipse(center, 300, 300)
 
-        # Inner Ring (Pulsing)
-        inner_pulse = abs(np.sin(self.pulse)) * 10
-        inner_radius = 40 + inner_pulse
-
-        inner_color = QColor(0, 242, 255, 200) if not self.is_thinking else QColor(255, 0, 100, 200)
-        painter.setPen(QPen(inner_color, 4))
-        painter.drawEllipse(center, inner_radius, inner_radius)
-
-        # Center Core
-        core_gradient = QRadialGradient(center, inner_radius - 5)
-        core_gradient.setColorAt(0, inner_color)
-        core_gradient.setColorAt(1, Qt.GlobalColor.transparent)
-        painter.setBrush(QBrush(core_gradient))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(center, inner_radius - 5, inner_radius - 5)
-
-        # Outer Ring (Rotating segments)
-        painter.setPen(QPen(QColor(0, 242, 255, 150), 3, Qt.PenStyle.DashLine))
+        # 2. Outer Ring (Rotating)
         painter.save()
         painter.translate(center)
-        painter.rotate(self.angle)
+        painter.rotate(self.angle_outer)
 
-        # Outer Ring circle
-        painter.drawEllipse(QPointF(0, 0), 80, 80)
+        pen_outer = QPen(QColor(0, 242, 255, 100), 2)
+        pen_outer.setDashPattern([10, 10])
+        painter.setPen(pen_outer)
+        painter.drawEllipse(QRectF(-120, -120, 240, 240))
 
-        # Heavy segments
-        painter.setPen(QPen(QColor(0, 242, 255, 255), 6))
-        for i in range(0, 360, 45):
-            painter.drawArc(-85, -85, 170, 170, i * 16, 20 * 16)
+        # Outer thick segments
+        painter.setPen(QPen(QColor(0, 242, 255, 180), 5))
+        for i in range(0, 360, 60):
+            painter.drawArc(QRectF(-125, -125, 250, 250), i * 16, 30 * 16)
         painter.restore()
+
+        # 3. Inner Ring (Pulsing)
+        inner_scale = 1.0 + 0.1 * np.sin(self.pulse_inner)
+        inner_radius = 60 * inner_scale
+
+        color_inner = QColor(0, 242, 255, 220) if not self.is_thinking else QColor(255, 50, 50, 220)
+        painter.setPen(QPen(color_inner, 3))
+        painter.drawEllipse(center, inner_radius, inner_radius)
+
+        # Inner glow
+        inner_glow = QRadialGradient(center, inner_radius)
+        inner_glow.setColorAt(0, color_inner)
+        inner_glow.setColorAt(1, Qt.GlobalColor.transparent)
+        painter.setBrush(QBrush(inner_glow))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(center, inner_radius, inner_radius)
+
+        # 4. Core Triangle/Circle
+        painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
+        painter.drawEllipse(center, 15, 15)
 
     def set_text(self, text):
         if text != self.target_text:
@@ -412,6 +463,7 @@ class JarvisSignals(QObject):
 class Jarvis:
     def __init__(self, signals: JarvisSignals = None):
         self.signals = signals
+        self.memory = JarvisMemory()
         self.vad = VoiceActivityDetector()
         self.stt = SpeechToText()
         self.llm = LlmClient()
@@ -427,9 +479,23 @@ class Jarvis:
         self._audio_thread_lock = threading.Lock()
         self._current_audio_chunk = np.array([], dtype=np.int16)
 
-        # Conversation context
+        # Initial context loading from memory
+        context = self.memory.get_all_context()
         self.history = [
-            {"role": "system", "content": "Tu es JARVIS, un assistant personnel français. Tu dois TOUJOURS répondre en français, peu importe la langue utilisée par l'utilisateur. Tes réponses doivent être concises et adaptées à une interaction vocale."}
+            {"role": "system", "content": f"""Tu es JARVIS, un assistant personnel français intelligent et proactif.
+Tu dois TOUJOURS répondre en français. Tes réponses doivent être concises et adaptées à une interaction vocale.
+
+CONTEXTE MÉMOIRE (Faits dont tu dois te souvenir) :
+{context}
+
+ACTIONS DISPONIBLES (Inclus-les dans ta réponse si nécessaire) :
+- [CMD: OPEN_APP('nom')] : Pour ouvrir une application.
+- [CMD: SEARCH_WEB('requête')] : Pour faire une recherche.
+- [CMD: SAVE_FACT('type', 'contenu')] : Pour mémoriser une information importante.
+- [CMD: MIDI('commande')] : Placeholder pour le contrôle musical.
+
+Exemple : "Très bien monsieur, je lance Spotify. [CMD: OPEN_APP('spotify')]"
+"""}
         ]
         self.history_limit = 10
 
@@ -578,6 +644,33 @@ class Jarvis:
         with self._audio_thread_lock:
             self._current_audio_chunk = np.array([], dtype=np.int16)
 
+    def _execute_command(self, cmd_tag: str):
+        """Analyse et exécute un tag [CMD: ...]."""
+        try:
+            # Extraction du nom de la commande et de ses arguments
+            content = cmd_tag.replace("[CMD:", "").replace("]", "").strip()
+            # On cherche qqc comme OPEN_APP('spotify')
+            match = re.match(r"(\w+)\((.*)\)", content)
+            if not match: return
+
+            cmd_name = match.group(1)
+            # Nettoyage rudimentaire des quotes
+            args = [a.strip().strip("'").strip('"') for a in match.group(2).split(",")]
+
+            log.info(f"🚀 Exécution commande : {cmd_name} avec args {args}")
+
+            if cmd_name == "OPEN_APP":
+                # Sur Windows, on peut souvent juste lancer le nom de l'exe
+                os.system(f"start {args[0]}")
+            elif cmd_name == "SEARCH_WEB":
+                webbrowser.open(f"https://www.google.com/search?q={args[0]}")
+            elif cmd_name == "SAVE_FACT" and len(args) >= 2:
+                self.memory.save_memory(args[0], args[1])
+            elif cmd_name == "MIDI":
+                log.info(f"🎹 MIDI Placeholder: {args[0]}")
+        except Exception as e:
+            log.error(f"Erreur exécution commande {cmd_tag}: {e}")
+
     async def _process_and_respond(self, user_text: str):
         """
         Gère le flux : LLM stream -> Découpage en phrases -> TTS.
@@ -597,14 +690,28 @@ class Jarvis:
             async for token in self.llm.generate_stream(self.history):
                 current_sentence += token
                 full_response += token
+
+                # Détection de commandes au fil de l'eau
+                if "]" in token and "[CMD:" in full_response:
+                    cmd_match = re.search(r"(\[CMD:.*?\])", full_response)
+                    if cmd_match:
+                        cmd_tag = cmd_match.group(1)
+                        self._execute_command(cmd_tag)
+                        # On retire le tag du texte pour ne pas que le TTS le lise
+                        current_sentence = current_sentence.replace(cmd_tag, "")
+                        full_response = full_response.replace(cmd_tag, "")
+
                 if any(c in token for c in ".!?"):
                     parts = sentence_endings.split(current_sentence)
                     if len(parts) > 1:
                         for i in range(len(parts) - 1):
                             sentence_to_speak = parts[i].strip()
                             if sentence_to_speak:
-                                log.info(f"🎙️ TTS (phrase) : {sentence_to_speak}")
-                                await self.tts.speak(sentence_to_speak, self.audio_queue)
+                                # Retirer les éventuels restes de tags
+                                sentence_to_speak = re.sub(r"\[CMD:.*?\]", "", sentence_to_speak).strip()
+                                if sentence_to_speak:
+                                    log.info(f"🎙️ TTS (phrase) : {sentence_to_speak}")
+                                    await self.tts.speak(sentence_to_speak, self.audio_queue)
                         current_sentence = parts[-1]
 
             if current_sentence.strip():
