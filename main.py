@@ -27,7 +27,7 @@ from typing import AsyncGenerator, List
 
 import numpy as np
 from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QGraphicsDropShadowEffect
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QPropertyAnimation, QEasingCurve, QPointF
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QPropertyAnimation, QEasingCurve, QPointF, QRectF
 from PyQt6.QtGui import QColor, QPalette, QFont, QPainter, QRadialGradient, QPen, QBrush
 import sounddevice as sd
 import torch
@@ -380,8 +380,8 @@ class ArcReactor(QWidget):
         painter.save()
         painter.translate(center)
         painter.rotate(self.angle)
-        rect = QPointF(-80, -80)
-        painter.drawEllipse(rect.x(), rect.y(), 160, 160)
+        rect = QRectF(-80, -80, 160, 160)
+        painter.drawEllipse(rect)
 
         # Heavy segments
         painter.setPen(QPen(QColor(0, 242, 255, 255), 6))
