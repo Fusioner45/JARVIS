@@ -311,13 +311,6 @@ class ArcReactor(QWidget):
             }
         """)
 
-        # Glow Effect global
-        glow = QGraphicsDropShadowEffect()
-        glow.setBlurRadius(25)
-        glow.setColor(QColor(0, 242, 255, 150))
-        glow.setOffset(0, 0)
-        self.setGraphicsEffect(glow)
-
         # Layout
         layout = QVBoxLayout(self)
         layout.addSpacing(400) # Laisser la place pour l'Arc Reactor
@@ -359,6 +352,14 @@ class ArcReactor(QWidget):
 
         center = QPointF(self.width() / 2, 200)
 
+        # Draw Global Glow manually
+        glow_gradient = QRadialGradient(center, 250)
+        glow_gradient.setColorAt(0, QColor(0, 242, 255, 40))
+        glow_gradient.setColorAt(1, Qt.GlobalColor.transparent)
+        painter.setBrush(QBrush(glow_gradient))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(center, 250, 250)
+
         # Inner Ring (Pulsing)
         inner_pulse = abs(np.sin(self.pulse)) * 10
         inner_radius = 40 + inner_pulse
@@ -380,8 +381,9 @@ class ArcReactor(QWidget):
         painter.save()
         painter.translate(center)
         painter.rotate(self.angle)
-        rect = QRectF(-80, -80, 160, 160)
-        painter.drawEllipse(rect)
+
+        # Outer Ring circle
+        painter.drawEllipse(QPointF(0, 0), 80, 80)
 
         # Heavy segments
         painter.setPen(QPen(QColor(0, 242, 255, 255), 6))
@@ -651,6 +653,12 @@ def main():
 
     # HUD
     reactor = ArcReactor()
+
+    # Centrer le HUD sur l'écran principal
+    screen = app.primaryScreen().availableGeometry()
+    reactor.move(screen.center().x() - reactor.width() // 2,
+                 screen.center().y() - reactor.height() // 2)
+
     reactor.show()
 
     # Signaux
