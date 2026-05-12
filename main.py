@@ -148,6 +148,8 @@ class SpeechToText:
             segments, info = self.model.transcribe(
                 audio_np,
                 language="fr",
+                task="transcribe",
+                initial_prompt="Ceci est une conversation avec Jarvis, un assistant vocal français.",
                 beam_size=5,
                 vad_filter=False,  # on fait notre propre VAD en amont
             )
@@ -188,26 +190,24 @@ class LlmClient:
         if self.session and not self.session.closed:
             await self.session.close()
 
-    async def generate_stream(self, prompt: str) -> AsyncGenerator[str, None]:
+    async def generate_stream(self, messages: List[dict]) -> AsyncGenerator[str, None]:
         """
-        Envoie le prompt à Ollama et yield les morceaux de texte au fur et à mesure.
+        Envoie les messages à Ollama et yield les morceaux de texte au fur et à mesure.
         Utilise l'endpoint /v1/chat/completions avec stream=True.
         """
         await self._ensure_session()
         url = f"{self.base_url}/v1/chat/completions"
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": "Tu es Jarvis, un assistant vocal utile et concis."},
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "temperature": 0.7,
             "max_tokens": 512,
             "stream": True,
         }
         try:
+            # On utilise un timeout plus long pour la connexion et on laisse le stream s'écouler
             async with self.session.post(
-                url, json=payload, timeout=aiohttp.ClientTimeout(total=60)
+                url, json=payload, timeout=aiohttp.ClientTimeout(connect=5, total=120)
             ) as resp:
                 resp.raise_for_status()
                 # Lecture du stream JSON-L (OpenAI format)
@@ -292,6 +292,12 @@ class Jarvis:
         # Audio output synchronization
         self._audio_thread_lock = threading.Lock()
         self._current_audio_chunk = np.array([], dtype=np.int16)
+
+        # Conversation context
+        self.history = [
+            {"role": "system", "content": "Tu es JARVIS, un assistant personnel français. Tu dois TOUJOURS répondre en français, peu importe la langue utilisée par l'utilisateur. Tes réponses doivent être concises et adaptées à une interaction vocale."}
+        ]
+        self.history_limit = 10
 
     async def _audio_listener(self) -> AsyncGenerator[str, None]:
         """
@@ -433,11 +439,16 @@ class Jarvis:
         """
         sentence_endings = re.compile(r'(?<=[.!?])\s+')
         current_sentence = ""
+        full_response = ""
         log.info("🤖 Jarvis réfléchit...")
 
+        # Ajouter le message utilisateur à l'historique
+        self.history.append({"role": "user", "content": user_text})
+
         try:
-            async for token in self.llm.generate_stream(user_text):
+            async for token in self.llm.generate_stream(self.history):
                 current_sentence += token
+                full_response += token
                 if any(c in token for c in ".!?"):
                     parts = sentence_endings.split(current_sentence)
                     if len(parts) > 1:
@@ -451,6 +462,13 @@ class Jarvis:
             if current_sentence.strip():
                 log.info(f"🎙️ TTS (final) : {current_sentence.strip()}")
                 await self.tts.speak(current_sentence.strip(), self.audio_queue)
+
+            # Ajouter la réponse complète à l'historique
+            if full_response.strip():
+                self.history.append({"role": "assistant", "content": full_response.strip()})
+                # Limiter l'historique pour éviter les prompts trop longs (on garde le system prompt + X derniers messages)
+                if len(self.history) > self.history_limit:
+                    self.history = [self.history[0]] + self.history[-(self.history_limit-1):]
 
         except asyncio.CancelledError:
             log.debug("Tâche de réponse annulée.")
