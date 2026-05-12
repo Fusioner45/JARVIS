@@ -20,6 +20,7 @@ import sys
 import io
 import json
 import re
+import threading
 from collections import deque
 from typing import AsyncGenerator, List
 
@@ -39,7 +40,7 @@ FRAME_MS = 32                     # ms – size of each audio frame for VAD
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_MS / 1000)  # samples per frame
 # VAD_MODE deleted                      # 0‑3, 2 = bonne compromis sensibilité/robustesse
 SILENCE_FRAMES_THRESHOLD = 15     # nombre de frames silencieuses pour finir une utterance
-WHISPER_MODEL_SIZE = "large-v3"      # tiny, base, small, medium, large‑v2 …
+WHISPER_MODEL_SIZE = "distil-large-v3"      # tiny, base, small, medium, large‑v2 …
 WHISPER_DEVICE = "cuda"           # on utilise le GPU
 WHISPER_COMPUTE_TYPE = "int8_float16"  # optimum pour RTX 30xx
 OLLAMA_HOST = "http://localhost:11434"
@@ -237,36 +238,39 @@ class TextToSpeech:
     def __init__(self, voice: str = EDGE_TTS_VOICE):
         self.voice = voice
 
-    async def speak(self, text: str, stream: sd.OutputStream):
+    async def speak(self, text: str, audio_queue: asyncio.Queue):
         """
         Lit le texte à voix haute grâce à edge‑tts.
-        Écrit directement dans le stream sounddevice fourni.
+        Accumule tout l'audio d'une phrase avant de le décoder pour éviter les erreurs FFMPEG.
         """
         if not text:
             return
 
         communicate = edge_tts.Communicate(text, voice=self.voice)
-        loop = asyncio.get_running_loop()
+        mp3_data = io.BytesIO()
 
         async for chunk in communicate.stream():
-            if chunk["type"] != "audio":
-                continue
-            mp3_bytes: bytes = chunk["data"]
+            if chunk["type"] == "audio":
+                mp3_data.write(chunk["data"])
 
+        if mp3_data.tell() == 0:
+            return
+
+        mp3_data.seek(0)
+        loop = asyncio.get_running_loop()
+
+        def _decode():
             try:
-                # Décodage MP3 → PCM (int16, mono, SAMPLE_RATE)
-                audio_segment = AudioSegment.from_file(
-                    io.BytesIO(mp3_bytes), format="mp3"
-                )
+                audio_segment = AudioSegment.from_file(mp3_data, format="mp3")
                 audio_segment = audio_segment.set_frame_rate(SAMPLE_RATE).set_channels(1).set_sample_width(2)
-                # Conversion des bytes raw en numpy array int16
-                pcm_array = np.frombuffer(audio_segment.raw_data, dtype=np.int16)
+                return np.frombuffer(audio_segment.raw_data, dtype=np.int16)
             except Exception as e:
                 log.error(f"Erreur de décodage MP3 : {e}")
-                continue
+                return None
 
-            # Écrire dans le stream sounddevice via un exécuteur pour ne pas bloquer l'event loop
-            await loop.run_in_executor(None, stream.write, pcm_array)
+        pcm_array = await loop.run_in_executor(None, _decode)
+        if pcm_array is not None:
+            await audio_queue.put(pcm_array)
 
 
 # ----------------------------------------------------------------------
@@ -284,6 +288,10 @@ class Jarvis:
         self._speech_buffer: List[bytes] = []
         self._silence_count = 0
         self._is_speaking = False
+
+        # Audio output synchronization
+        self._audio_thread_lock = threading.Lock()
+        self._current_audio_chunk = np.array([], dtype=np.int16)
 
     async def _audio_listener(self) -> AsyncGenerator[str, None]:
         """
@@ -336,65 +344,116 @@ class Jarvis:
         """
         log.info("🚀 Jarvis V2 démarré – dites quelque chose !")
 
-        # Stream de sortie partagé pour le TTS
+        # File d'attente pour l'audio PCM à jouer
+        self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
+
+        # Stream sounddevice avec callback pour une lecture fluide sans stuttering
+        def audio_callback(outdata, frames, time, status):
+            if status:
+                log.warning(f"Audio output status: {status}")
+
+            # On essaie de récupérer de la donnée du buffer interne
+            data = self._get_next_audio_chunk(frames)
+            if data is not None:
+                outdata[:len(data), 0] = data
+                if len(data) < frames:
+                    outdata[len(data):, 0] = 0
+            else:
+                outdata.fill(0)
+
+        # Buffer interne pour le callback
+        self._current_audio_chunk = np.array([], dtype=np.int16)
+
         output_stream = sd.OutputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="int16",
-            blocksize=SAMPLE_RATE // 10, # 100ms de buffer matériel
+            callback=audio_callback,
+            blocksize=FRAME_SIZE,
         )
         output_stream.start()
 
+        # Tâche de fond pour consommer la queue
+        async def audio_worker():
+            while True:
+                chunk = await self.audio_queue.get()
+                if chunk is None: break
+                # On concatène au buffer interne
+                self._append_audio_chunk(chunk)
+                self.audio_queue.task_done()
+
+        worker_task = asyncio.create_task(audio_worker())
+
         try:
             async for user_text in self._audio_listener():
-                # Barge-in : annuler la réponse en cours
+                # Barge-in : annuler la réponse et vider l'audio
                 if hasattr(self, "_response_task") and not self._response_task.done():
                     log.info("🚫 Interruption (Barge-in) – on coupe la parole.")
                     self._response_task.cancel()
-                    # On ne peut pas facilement vider le buffer matériel de sounddevice ici,
-                    # mais arrêter d'écrire dedans est déjà un bon début.
 
-                self._response_task = asyncio.create_task(self._process_and_respond(user_text, output_stream))
+                # Vider le buffer audio pour arrêter de parler immédiatement
+                self._clear_audio_buffer()
+                while not self.audio_queue.empty():
+                    try: self.audio_queue.get_nowait(); self.audio_queue.task_done()
+                    except asyncio.QueueEmpty: break
+
+                self._response_task = asyncio.create_task(self._process_and_respond(user_text))
         finally:
             output_stream.stop()
             output_stream.close()
+            await self.audio_queue.put(None)
+            await worker_task
             await self.llm.close()
             log.info("🔌 Session Ollama fermée.")
 
-    async def _process_and_respond(self, user_text: str, output_stream: sd.OutputStream):
+    def _append_audio_chunk(self, chunk):
+        with self._audio_thread_lock:
+            if self._current_audio_chunk.size == 0:
+                self._current_audio_chunk = chunk
+            else:
+                self._current_audio_chunk = np.concatenate([self._current_audio_chunk, chunk])
+
+    def _get_next_audio_chunk(self, frames):
+        with self._audio_thread_lock:
+            if self._current_audio_chunk.size == 0:
+                return None
+
+            take = min(frames, self._current_audio_chunk.size)
+            chunk = self._current_audio_chunk[:take]
+            self._current_audio_chunk = self._current_audio_chunk[take:]
+            return chunk
+
+    def _clear_audio_buffer(self):
+        with self._audio_thread_lock:
+            self._current_audio_chunk = np.array([], dtype=np.int16)
+
+    async def _process_and_respond(self, user_text: str):
         """
         Gère le flux : LLM stream -> Découpage en phrases -> TTS.
         """
-        # On découpe sur la ponctuation suivie d'un espace ou fin de ligne
         sentence_endings = re.compile(r'(?<=[.!?])\s+')
-
         current_sentence = ""
         log.info("🤖 Jarvis réfléchit...")
 
         try:
             async for token in self.llm.generate_stream(user_text):
                 current_sentence += token
-
-                # Si on a un signe de ponctuation fort, on tente de découper
                 if any(c in token for c in ".!?"):
                     parts = sentence_endings.split(current_sentence)
-                    # Si on a au moins une phrase complète (parts[0]) et un reliquat (parts[1...])
                     if len(parts) > 1:
                         for i in range(len(parts) - 1):
                             sentence_to_speak = parts[i].strip()
                             if sentence_to_speak:
                                 log.info(f"🎙️ TTS (phrase) : {sentence_to_speak}")
-                                await self.tts.speak(sentence_to_speak, output_stream)
+                                await self.tts.speak(sentence_to_speak, self.audio_queue)
                         current_sentence = parts[-1]
 
-            # Parler le reste (dernière phrase sans ponctuation finale peut-être)
             if current_sentence.strip():
                 log.info(f"🎙️ TTS (final) : {current_sentence.strip()}")
-                await self.tts.speak(current_sentence.strip(), output_stream)
+                await self.tts.speak(current_sentence.strip(), self.audio_queue)
 
         except asyncio.CancelledError:
             log.debug("Tâche de réponse annulée.")
-            # On ne ferme pas la session ici car elle est partagée
         except Exception as e:
             log.error(f"Erreur dans le cycle de réponse : {e}")
 
