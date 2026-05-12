@@ -26,9 +26,9 @@ from collections import deque
 from typing import AsyncGenerator, List
 
 import numpy as np
-from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QColor, QPalette, QFont, QPainter, QRadialGradient
+from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QGraphicsDropShadowEffect
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QPropertyAnimation, QEasingCurve, QPointF
+from PyQt6.QtGui import QColor, QPalette, QFont, QPainter, QRadialGradient, QPen, QBrush
 import sounddevice as sd
 import torch
 from faster_whisper import WhisperModel
@@ -153,8 +153,9 @@ class SpeechToText:
                 audio_np,
                 language="fr",
                 task="transcribe",
-                initial_prompt="Ceci est une conversation en français entre un humain et un assistant nommé Jarvis.",
+                initial_prompt="Bonjour, je suis Jarvis. Je parle français.",
                 beam_size=5,
+                best_of=5,
                 vad_filter=False,  # on fait notre propre VAD en amont
             )
             text = " ".join(seg.text for seg in segments).strip()
@@ -198,8 +199,8 @@ class LlmClient:
         """
         Envoie les messages à Ollama et yield les morceaux de texte au fur et à mesure.
         Utilise l'endpoint /v1/chat/completions avec stream=True.
+        Inclut une logique de retry pour gérer les erreurs 500.
         """
-        await self._ensure_session()
         url = f"{self.base_url}/v1/chat/completions"
         payload = {
             "model": self.model,
@@ -208,31 +209,45 @@ class LlmClient:
             "max_tokens": 512,
             "stream": True,
         }
-        try:
-            # On utilise un timeout plus long pour la connexion et on laisse le stream s'écouler
-            async with self.session.post(
-                url, json=payload, timeout=aiohttp.ClientTimeout(connect=5, total=120)
-            ) as resp:
-                resp.raise_for_status()
-                # Lecture du stream JSON-L (OpenAI format)
-                async for line in resp.content:
-                    if not line:
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await self._ensure_session()
+                # On utilise un timeout plus long pour la connexion et on laisse le stream s'écouler
+                async with self.session.post(
+                    url, json=payload, timeout=aiohttp.ClientTimeout(connect=5, total=120)
+                ) as resp:
+                    if resp.status == 500:
+                        log.warning(f"Ollama error 500 (attempt {attempt+1}/{max_retries}). Retrying...")
+                        await asyncio.sleep(1)
                         continue
-                    line_str = line.decode("utf-8").strip()
-                    if line_str.startswith("data: "):
-                        data_content = line_str[6:]
-                        if data_content == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_content)
-                            token = data["choices"][0]["delta"].get("content", "")
-                            if token:
-                                yield token
-                        except Exception:
+
+                    resp.raise_for_status()
+                    # Lecture du stream JSON-L (OpenAI format)
+                    async for line in resp.content:
+                        if not line:
                             continue
-        except Exception as e:
-            log.error(f"Erreur lors du stream Ollama : {e}")
-            yield "Désolé, je n'ai pas pu obtenir de réponse."
+                        line_str = line.decode("utf-8").strip()
+                        if line_str.startswith("data: "):
+                            data_content = line_str[6:]
+                            if data_content == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_content)
+                                token = data["choices"][0]["delta"].get("content", "")
+                                if token:
+                                    yield token
+                            except Exception:
+                                continue
+                    return # Succès
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    log.error(f"Erreur finale lors du stream Ollama : {e}")
+                    yield "Désolé, je n'ai pas pu obtenir de réponse."
+                else:
+                    log.warning(f"Ollama stream error: {e}. Retrying...")
+                    await asyncio.sleep(1)
 
 
 # ----------------------------------------------------------------------
@@ -278,65 +293,107 @@ class TextToSpeech:
 
 
 # ----------------------------------------------------------------------
-# UI PyQt6 - Cyberpunk HUD
+# UI PyQt6 - Cyberpunk HUD (Iron Man Style)
 # ----------------------------------------------------------------------
 class ArcReactor(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(400, 400)
+        self.resize(500, 600)
 
-        self.glow_radius = 50
-        self.glow_color = QColor(0, 255, 255, 150) # Cyan cyberpunk
+        # Effet Glassmorphism pour le widget principal (optionnel visuellement sur fond transparent)
+        self.setStyleSheet("""
+            QWidget {
+                background-color: rgba(0, 20, 40, 0.4);
+                border-radius: 20px;
+                border: 1px solid rgba(0, 242, 255, 0.3);
+            }
+        """)
 
-        # Layout pour la transcription
+        # Glow Effect global
+        glow = QGraphicsDropShadowEffect()
+        glow.setBlurRadius(25)
+        glow.setColor(QColor(0, 242, 255, 150))
+        glow.setOffset(0, 0)
+        self.setGraphicsEffect(glow)
+
+        # Layout
         layout = QVBoxLayout(self)
-        layout.addStretch()
-        self.label = QLabel("", self)
-        self.label.setStyleSheet("color: #00ffff; font-family: 'Consolas'; font-size: 16px; background-color: rgba(0,0,0,100); padding: 5px;")
+        layout.addSpacing(400) # Laisser la place pour l'Arc Reactor
+
+        self.label = QLabel("INITIALIZING...", self)
+        font = QFont("OCR A Extended", 14)
+        if font.family() == "": font = QFont("Consolas", 14)
+        self.label.setFont(font)
+        self.label.setStyleSheet("color: #00f2ff; background: transparent; border: none;")
         self.label.setWordWrap(True)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.label)
 
-        # Animation
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update)
-        self.timer.start(50)
-        self.pulse_val = 0
+        # Paramètres d'animation
+        self.angle = 0
+        self.pulse = 0
         self.is_thinking = False
+        self.target_text = ""
+        self.current_text = ""
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.animate)
+        self.timer.start(30)
+
+    def animate(self):
+        self.angle = (self.angle + (5 if self.is_thinking else 2)) % 360
+        self.pulse += 0.1
+
+        # Typewriter effect
+        if len(self.current_text) < len(self.target_text):
+            self.current_text += self.target_text[len(self.current_text)]
+            self.label.setText(self.current_text)
+
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        center = self.rect().center()
-        center_f = center.toPointF()
+        center = QPointF(self.width() / 2, 200)
 
-        # Calcul du pulse
-        if self.is_thinking:
-            self.pulse_val += 0.2
-        else:
-            self.pulse_val += 0.05
+        # Inner Ring (Pulsing)
+        inner_pulse = abs(np.sin(self.pulse)) * 10
+        inner_radius = 40 + inner_pulse
 
-        dynamic_radius = self.glow_radius + (15 * np.sin(self.pulse_val))
+        inner_color = QColor(0, 242, 255, 200) if not self.is_thinking else QColor(255, 0, 100, 200)
+        painter.setPen(QPen(inner_color, 4))
+        painter.drawEllipse(center, inner_radius, inner_radius)
 
-        # Gradient pour l'effet Arc Reactor
-        gradient = QRadialGradient(center_f, dynamic_radius)
-        if self.is_thinking:
-            gradient.setColorAt(0, QColor(255, 0, 255, 200)) # Magenta quand il réfléchit
-        else:
-            gradient.setColorAt(0, QColor(0, 255, 255, 200))
-
-        gradient.setColorAt(0.5, QColor(0, 100, 255, 100))
-        gradient.setColorAt(1, QColor(0, 0, 0, 0))
-
-        painter.setBrush(gradient)
+        # Center Core
+        core_gradient = QRadialGradient(center, inner_radius - 5)
+        core_gradient.setColorAt(0, inner_color)
+        core_gradient.setColorAt(1, Qt.GlobalColor.transparent)
+        painter.setBrush(QBrush(core_gradient))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(center, int(dynamic_radius), int(dynamic_radius))
+        painter.drawEllipse(center, inner_radius - 5, inner_radius - 5)
+
+        # Outer Ring (Rotating segments)
+        painter.setPen(QPen(QColor(0, 242, 255, 150), 3, Qt.PenStyle.DashLine))
+        painter.save()
+        painter.translate(center)
+        painter.rotate(self.angle)
+        rect = QPointF(-80, -80)
+        painter.drawEllipse(rect.x(), rect.y(), 160, 160)
+
+        # Heavy segments
+        painter.setPen(QPen(QColor(0, 242, 255, 255), 6))
+        for i in range(0, 360, 45):
+            painter.drawArc(-85, -85, 170, 170, i * 16, 20 * 16)
+        painter.restore()
 
     def set_text(self, text):
-        self.label.setText(text)
+        if text != self.target_text:
+            self.target_text = text
+            self.current_text = ""
+            self.label.setText("")
 
     def set_thinking(self, thinking: bool):
         self.is_thinking = thinking
@@ -391,6 +448,15 @@ class Jarvis:
                     if hasattr(self, "_response_task") and not self._response_task.done():
                         log.info("🚫 Interruption (Barge-in) détectée – silence !")
                         self._response_task.cancel()
+
+                    # On vide le buffer audio IMMÉDIATEMENT pour un silence instantané
+                    self._clear_audio_buffer()
+                    while not self.audio_queue.empty():
+                        try:
+                            self.audio_queue.get_nowait()
+                            self.audio_queue.task_done()
+                        except asyncio.QueueEmpty:
+                            break
 
                     # On initialise le speech buffer avec le pre-roll pour ne pas couper le début
                     self._speech_buffer = list(self._pre_roll_buffer)
