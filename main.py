@@ -21,10 +21,14 @@ import io
 import json
 import re
 import threading
+import time
 from collections import deque
 from typing import AsyncGenerator, List
 
 import numpy as np
+from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QPropertyAnimation, QEasingCurve
+from PyQt6.QtGui import QColor, QPalette, QFont, QPainter, QRadialGradient
 import sounddevice as sd
 import torch
 from faster_whisper import WhisperModel
@@ -149,7 +153,7 @@ class SpeechToText:
                 audio_np,
                 language="fr",
                 task="transcribe",
-                initial_prompt="Ceci est une conversation avec Jarvis, un assistant vocal français.",
+                initial_prompt="Ceci est une conversation en français entre un humain et un assistant nommé Jarvis.",
                 beam_size=5,
                 vad_filter=False,  # on fait notre propre VAD en amont
             )
@@ -274,10 +278,80 @@ class TextToSpeech:
 
 
 # ----------------------------------------------------------------------
+# UI PyQt6 - Cyberpunk HUD
+# ----------------------------------------------------------------------
+class ArcReactor(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(400, 400)
+
+        self.glow_radius = 50
+        self.glow_color = QColor(0, 255, 255, 150) # Cyan cyberpunk
+
+        # Layout pour la transcription
+        layout = QVBoxLayout(self)
+        layout.addStretch()
+        self.label = QLabel("", self)
+        self.label.setStyleSheet("color: #00ffff; font-family: 'Consolas'; font-size: 16px; background-color: rgba(0,0,0,100); padding: 5px;")
+        self.label.setWordWrap(True)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.label)
+
+        # Animation
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update)
+        self.timer.start(50)
+        self.pulse_val = 0
+        self.is_thinking = False
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        center = self.rect().center()
+
+        # Calcul du pulse
+        if self.is_thinking:
+            self.pulse_val += 0.2
+        else:
+            self.pulse_val += 0.05
+
+        dynamic_radius = self.glow_radius + (15 * np.sin(self.pulse_val))
+
+        # Gradient pour l'effet Arc Reactor
+        gradient = QRadialGradient(center, dynamic_radius)
+        if self.is_thinking:
+            gradient.setColorAt(0, QColor(255, 0, 255, 200)) # Magenta quand il réfléchit
+        else:
+            gradient.setColorAt(0, QColor(0, 255, 255, 200))
+
+        gradient.setColorAt(0.5, QColor(0, 100, 255, 100))
+        gradient.setColorAt(1, QColor(0, 0, 0, 0))
+
+        painter.setBrush(gradient)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(center, int(dynamic_radius), int(dynamic_radius))
+
+    def set_text(self, text):
+        self.label.setText(text)
+
+    def set_thinking(self, thinking: bool):
+        self.is_thinking = thinking
+
+
+class JarvisSignals(QObject):
+    transcription_received = pyqtSignal(str)
+    thinking_state_changed = pyqtSignal(bool)
+
+
+# ----------------------------------------------------------------------
 # Orchestrateur principal – boucle async
 # ----------------------------------------------------------------------
 class Jarvis:
-    def __init__(self):
+    def __init__(self, signals: JarvisSignals = None):
+        self.signals = signals
         self.vad = VoiceActivityDetector()
         self.stt = SpeechToText()
         self.llm = LlmClient()
@@ -335,6 +409,8 @@ class Jarvis:
                             transcript = await self.stt.transcribe(self._speech_buffer)
                             if transcript:
                                 log.info(f"🗣️ Transcription : {transcript}")
+                            if self.signals:
+                                self.signals.transcription_received.emit(transcript)
                                 yield transcript
 
                         # Reset
@@ -442,6 +518,9 @@ class Jarvis:
         full_response = ""
         log.info("🤖 Jarvis réfléchit...")
 
+        if self.signals:
+            self.signals.thinking_state_changed.emit(True)
+
         # Ajouter le message utilisateur à l'historique
         self.history.append({"role": "user", "content": user_text})
 
@@ -463,6 +542,9 @@ class Jarvis:
                 log.info(f"🎙️ TTS (final) : {current_sentence.strip()}")
                 await self.tts.speak(current_sentence.strip(), self.audio_queue)
 
+            if self.signals:
+                self.signals.thinking_state_changed.emit(False)
+
             # Ajouter la réponse complète à l'historique
             if full_response.strip():
                 self.history.append({"role": "assistant", "content": full_response.strip()})
@@ -474,20 +556,49 @@ class Jarvis:
             log.debug("Tâche de réponse annulée.")
         except Exception as e:
             log.error(f"Erreur dans le cycle de réponse : {e}")
+            if self.signals:
+                self.signals.thinking_state_changed.emit(False)
 
 
 # ----------------------------------------------------------------------
-# Entrée du script
+# Entrée du script avec intégration PyQt6 + Asyncio
 # ----------------------------------------------------------------------
+class JarvisWorker(QThread):
+    def __init__(self, signals):
+        super().__init__()
+        self.signals = signals
+
+    def run(self):
+        asyncio.run(self.run_async())
+
+    async def run_async(self):
+        try:
+            self.jarvis = Jarvis(signals=self.signals)
+            await self.jarvis.run()
+        except Exception as e:
+            log.error(f"Erreur dans le worker Jarvis : {e}")
+
+
 def main():
+    app = QApplication(sys.argv)
+
+    # HUD
+    reactor = ArcReactor()
+    reactor.show()
+
+    # Signaux
+    signals = JarvisSignals()
+    signals.transcription_received.connect(reactor.set_text)
+    signals.thinking_state_changed.connect(reactor.set_thinking)
+
+    # Démarrage de Jarvis dans un thread séparé
+    worker = JarvisWorker(signals)
+    worker.start()
+
     try:
-        jarvis = Jarvis()
-        asyncio.run(jarvis.run())
+        sys.exit(app.exec())
     except KeyboardInterrupt:
         log.info("\n👋 Arrêt demandé par l'utilisateur. Au revoir !")
-    except Exception as exc:
-        log.exception(f"Erreur fatale : {exc}")
-        sys.exit(1)
 
 
 if __name__ == "__main__":
