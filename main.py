@@ -39,7 +39,7 @@ FRAME_MS = 32                     # ms – size of each audio frame for VAD
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_MS / 1000)  # samples per frame
 # VAD_MODE deleted                      # 0‑3, 2 = bonne compromis sensibilité/robustesse
 SILENCE_FRAMES_THRESHOLD = 15     # nombre de frames silencieuses pour finir une utterance
-WHISPER_MODEL_SIZE = "small"      # tiny, base, small, medium, large‑v2 …
+WHISPER_MODEL_SIZE = "large-v3"      # tiny, base, small, medium, large‑v2 …
 WHISPER_DEVICE = "cuda"           # on utilise le GPU
 WHISPER_COMPUTE_TYPE = "int8_float16"  # optimum pour RTX 30xx
 OLLAMA_HOST = "http://localhost:11434"
@@ -259,13 +259,14 @@ class TextToSpeech:
                     io.BytesIO(mp3_bytes), format="mp3"
                 )
                 audio_segment = audio_segment.set_frame_rate(SAMPLE_RATE).set_channels(1).set_sample_width(2)
-                pcm = audio_segment.raw_data
+                # Conversion des bytes raw en numpy array int16
+                pcm_array = np.frombuffer(audio_segment.raw_data, dtype=np.int16)
             except Exception as e:
                 log.error(f"Erreur de décodage MP3 : {e}")
                 continue
 
             # Écrire dans le stream sounddevice via un exécuteur pour ne pas bloquer l'event loop
-            await loop.run_in_executor(None, stream.write, pcm)
+            await loop.run_in_executor(None, stream.write, pcm_array)
 
 
 # ----------------------------------------------------------------------
@@ -340,6 +341,7 @@ class Jarvis:
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="int16",
+            blocksize=SAMPLE_RATE // 10, # 100ms de buffer matériel
         )
         output_stream.start()
 
