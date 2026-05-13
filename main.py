@@ -97,8 +97,8 @@ class JarvisMemory:
 # Audio / Playlists
 # ----------------------------------------------------------------------
 PLAYLISTS = {
-    "titre liké": "https://open.spotify.com/collection/tracks",
-    "son triste": "https://open.spotify.com/playlist/4WU64ygsmIDYDwPEI2BDnQ"
+    "liké": "https://open.spotify.com/collection/tracks",
+    "triste": "https://open.spotify.com/playlist/4WU64ygsmIDYDwPEI2BDnQ"
 }
 
 # ----------------------------------------------------------------------
@@ -715,17 +715,18 @@ Exemple : "Tout de suite, {self.user_name}, je lance votre playlist son triste. 
                 target_url = None
                 is_local = False
 
-                # 1. Vérification Playlist
-                for key, url in PLAYLISTS.items():
-                    if key in query:
+                # Étape 1 : Vérification des mots-clés Spotify
+                for keyword, url in PLAYLISTS.items():
+                    if keyword in query:
                         target_url = url
                         break
 
-                # 2. Vérification Local
-                if not target_url and any(word in query for word in ["local", "mon pc", "ordinateur"]):
-                    is_local = True
+                # Étape 2 : Vérification Local (si pas de playlist trouvée)
+                if not target_url:
+                    if any(word in query for word in ["local", "mon pc", "ordinateur", "hors ligne"]):
+                        is_local = True
 
-                # 3. Fallback YouTube
+                # Étape 3 : Fallback YouTube (si ni playlist ni local)
                 if not target_url and not is_local:
                     target_url = f"https://www.youtube.com/results?search_query={args[0]}"
 
@@ -735,10 +736,11 @@ Exemple : "Tout de suite, {self.user_name}, je lance votre playlist son triste. 
                 elif target_url:
                     log.info(f"🌐 Ouverture URL Musique : {target_url}")
                     webbrowser.open(target_url)
-                    # Stark Touch: Automatique Play
+                    # Stark Touch: Automatique Play après chargement (5s)
                     def _music_auto_play():
                         time.sleep(5)
                         pyautogui.press('space')
+                        log.info("🎹 Stark Touch: Spacebar pressed")
                     threading.Thread(target=_music_auto_play, daemon=True).start()
 
             elif cmd_name == "SAVE_FACT" and len(args) >= 2:
