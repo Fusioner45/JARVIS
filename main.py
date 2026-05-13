@@ -32,6 +32,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QPropertyAnim
 from PyQt6.QtGui import QColor, QPalette, QFont, QPainter, QRadialGradient, QPen, QBrush
 import webbrowser
 import os
+import pyautogui
 import sounddevice as sd
 import torch
 from faster_whisper import WhisperModel
@@ -71,6 +72,13 @@ class JarvisMemory:
                                  (f"%{search_term}%", f"%{search_term}%"))
             return [row[0] for row in cursor.fetchall()]
 
+    def delete_memory(self, search_term: str):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM memory WHERE content LIKE ? OR fact_type LIKE ?",
+                         (f"%{search_term}%", f"%{search_term}%"))
+            conn.commit()
+            log.info(f"🗑️ Mémoire supprimée pour : {search_term}")
+
     def get_all_context(self) -> str:
         """Récupère un résumé de tous les faits pour le prompt système."""
         with sqlite3.connect(self.db_path) as conn:
@@ -86,7 +94,7 @@ FRAME_MS = 32                     # ms – size of each audio frame for VAD
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_MS / 1000)  # samples per frame
 # VAD_MODE deleted                      # 0‑3, 2 = bonne compromis sensibilité/robustesse
 SILENCE_FRAMES_THRESHOLD = 15     # nombre de frames silencieuses pour finir une utterance
-WHISPER_MODEL_SIZE = "distil-large-v3"      # tiny, base, small, medium, large‑v2 …
+WHISPER_MODEL_SIZE = "medium"      # tiny, base, small, medium, large‑v2 …
 WHISPER_DEVICE = "cuda"           # on utilise le GPU
 WHISPER_COMPUTE_TYPE = "int8_float16"  # optimum pour RTX 30xx
 OLLAMA_HOST = "http://localhost:11434"
@@ -195,9 +203,10 @@ class SpeechToText:
                 audio_np,
                 language="fr",
                 task="transcribe",
-                initial_prompt="Ceci est une dictée en français. L'utilisateur parle de programmation, de menuiserie à Issoire et de révisions de cours. Ne pas traduire en anglais.",
+                initial_prompt="Ceci est une conversation en français uniquement. L'utilisateur parle de ses cours, de ses projets à Issoire et de musique. Ne jamais traduire en anglais.",
                 beam_size=5,
                 best_of=5,
+                suppress_tokens=[-1],
                 vad_filter=False,  # on fait notre propre VAD en amont
             )
             text = " ".join(seg.text for seg in segments).strip()
@@ -381,16 +390,19 @@ class ArcReactor(QWidget):
         self.timer.start(20) # 50 FPS
 
     def animate(self):
-        # Rotation ring
-        self.angle_outer = (self.angle_outer + (4 if self.is_thinking else 1)) % 360
-        self.pulse_inner += 0.15 if self.is_thinking else 0.05
+        try:
+            # Rotation ring
+            self.angle_outer = (self.angle_outer + (4 if self.is_thinking else 1)) % 360
+            self.pulse_inner += 0.15 if self.is_thinking else 0.05
 
-        # Typewriter effect
-        if len(self.current_text) < len(self.target_text):
-            self.current_text += self.target_text[len(self.current_text)]
-            self.label.setText(self.current_text)
+            # Typewriter effect
+            if len(self.current_text) < len(self.target_text):
+                self.current_text += self.target_text[len(self.current_text)]
+                self.label.setText(self.current_text)
 
-        self.update()
+            self.update()
+        except Exception:
+            self.timer.stop()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -492,6 +504,7 @@ ACTIONS DISPONIBLES (Inclus-les dans ta réponse si nécessaire) :
 - [CMD: OPEN_APP('nom')] : Pour ouvrir une application.
 - [CMD: SEARCH_WEB('requête')] : Pour faire une recherche.
 - [CMD: SAVE_FACT('type', 'contenu')] : Pour mémoriser une information importante.
+- [CMD: DELETE_FACT('recherche')] : Pour supprimer un fait de la mémoire.
 - [CMD: MIDI('commande')] : Placeholder pour le contrôle musical.
 
 Exemple : "Très bien monsieur, je lance Spotify. [CMD: OPEN_APP('spotify')]"
@@ -662,10 +675,18 @@ Exemple : "Très bien monsieur, je lance Spotify. [CMD: OPEN_APP('spotify')]"
             if cmd_name == "OPEN_APP":
                 # Sur Windows, on peut souvent juste lancer le nom de l'exe
                 os.system(f"start {args[0]}")
+                if "spotify" in args[0].lower():
+                    # Petite automatisation pour lancer la lecture
+                    def _spotify_play():
+                        time.sleep(3)
+                        pyautogui.press('enter')
+                    threading.Thread(target=_spotify_play, daemon=True).start()
             elif cmd_name == "SEARCH_WEB":
                 webbrowser.open(f"https://www.google.com/search?q={args[0]}")
             elif cmd_name == "SAVE_FACT" and len(args) >= 2:
                 self.memory.save_memory(args[0], args[1])
+            elif cmd_name == "DELETE_FACT":
+                self.memory.delete_memory(args[0])
             elif cmd_name == "MIDI":
                 log.info(f"🎹 MIDI Placeholder: {args[0]}")
         except Exception as e:

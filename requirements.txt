@@ -42,6 +42,7 @@ packaging==26.2
 pillow==12.2.0
 propcache==0.5.2
 protobuf==7.34.1
+pyautogui
 pycparser==3.0
 pydantic==2.13.4
 pydantic_core==2.46.4
