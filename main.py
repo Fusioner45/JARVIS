@@ -86,6 +86,21 @@ class JarvisMemory:
             facts = [f"- {ft}: {c}" for ft, c in cursor.fetchall()]
             return "\n".join(facts) if facts else "Aucun fait mémorisé pour le moment."
 
+    def get_user_name(self) -> str:
+        """Cherche le nom de l'utilisateur dans la mémoire."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT content FROM memory WHERE fact_type = 'nom_utilisateur' LIMIT 1")
+            row = cursor.fetchone()
+            return row[0] if row else "Utilisateur"
+
+# ----------------------------------------------------------------------
+# Audio / Playlists
+# ----------------------------------------------------------------------
+PLAYLISTS = {
+    "titre liké": "https://open.spotify.com/collection/tracks",
+    "son triste": "https://open.spotify.com/playlist/4WU64ygsmIDYDwPEI2BDnQ"
+}
+
 # ----------------------------------------------------------------------
 # Configuration (à adapter si besoin)
 # ----------------------------------------------------------------------
@@ -493,9 +508,12 @@ class Jarvis:
 
         # Initial context loading from memory
         context = self.memory.get_all_context()
+        self.user_name = self.memory.get_user_name()
+
         self.history = [
             {"role": "system", "content": f"""Tu es JARVIS, un assistant personnel français intelligent et proactif.
 Tu dois TOUJOURS répondre en français. Tes réponses doivent être concises et adaptées à une interaction vocale.
+Ton utilisateur actuel s'appelle {self.user_name}. Utilise son nom occasionnellement pour personnaliser tes réponses.
 
 CONTEXTE MÉMOIRE (Faits dont tu dois te souvenir) :
 {context}
@@ -503,11 +521,12 @@ CONTEXTE MÉMOIRE (Faits dont tu dois te souvenir) :
 ACTIONS DISPONIBLES (Inclus-les dans ta réponse si nécessaire) :
 - [CMD: OPEN_APP('nom')] : Pour ouvrir une application.
 - [CMD: SEARCH_WEB('requête')] : Pour faire une recherche.
+- [CMD: PLAY_MUSIC('recherche')] : Pour jouer de la musique (Spotify, YouTube ou Local).
 - [CMD: SAVE_FACT('type', 'contenu')] : Pour mémoriser une information importante.
 - [CMD: DELETE_FACT('recherche')] : Pour supprimer un fait de la mémoire.
 - [CMD: MIDI('commande')] : Placeholder pour le contrôle musical.
 
-Exemple : "Très bien monsieur, je lance Spotify. [CMD: OPEN_APP('spotify')]"
+Exemple : "Tout de suite, {self.user_name}, je lance votre playlist son triste. [CMD: PLAY_MUSIC('son triste')]"
 """}
         ]
         self.history_limit = 10
@@ -574,6 +593,11 @@ Exemple : "Très bien monsieur, je lance Spotify. [CMD: OPEN_APP('spotify')]"
         """
         log.info("🚀 Jarvis V2 démarré – dites quelque chose !")
 
+        # Salutation initiale
+        greeting = f"Bonjour {self.user_name}, systèmes en ligne. Comment puis-je vous aider ?"
+        if self.signals:
+            self.signals.transcription_received.emit(greeting)
+
         # File d'attente pour l'audio PCM à jouer
         self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
 
@@ -613,6 +637,9 @@ Exemple : "Très bien monsieur, je lance Spotify. [CMD: OPEN_APP('spotify')]"
                 self.audio_queue.task_done()
 
         worker_task = asyncio.create_task(audio_worker())
+
+        # Parler la salutation
+        await self.tts.speak(greeting, self.audio_queue)
 
         try:
             async for user_text in self._audio_listener():
@@ -683,6 +710,37 @@ Exemple : "Très bien monsieur, je lance Spotify. [CMD: OPEN_APP('spotify')]"
                     threading.Thread(target=_spotify_play, daemon=True).start()
             elif cmd_name == "SEARCH_WEB":
                 webbrowser.open(f"https://www.google.com/search?q={args[0]}")
+            elif cmd_name == "PLAY_MUSIC":
+                query = args[0].lower()
+                target_url = None
+                is_local = False
+
+                # 1. Vérification Playlist
+                for key, url in PLAYLISTS.items():
+                    if key in query:
+                        target_url = url
+                        break
+
+                # 2. Vérification Local
+                if not target_url and any(word in query for word in ["local", "mon pc", "ordinateur"]):
+                    is_local = True
+
+                # 3. Fallback YouTube
+                if not target_url and not is_local:
+                    target_url = f"https://www.youtube.com/results?search_query={args[0]}"
+
+                if is_local:
+                    log.info("📂 Ouverture musique locale C:\\musique")
+                    os.startfile(r'C:\musique')
+                elif target_url:
+                    log.info(f"🌐 Ouverture URL Musique : {target_url}")
+                    webbrowser.open(target_url)
+                    # Stark Touch: Automatique Play
+                    def _music_auto_play():
+                        time.sleep(5)
+                        pyautogui.press('space')
+                    threading.Thread(target=_music_auto_play, daemon=True).start()
+
             elif cmd_name == "SAVE_FACT" and len(args) >= 2:
                 self.memory.save_memory(args[0], args[1])
             elif cmd_name == "DELETE_FACT":
