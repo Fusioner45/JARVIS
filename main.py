@@ -35,6 +35,10 @@ import os
 import pyautogui
 import sounddevice as sd
 import torch
+import pynvml
+import pygetwindow as gw
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+from comtypes import CLSCTX_ALL
 from faster_whisper import WhisperModel
 import aiohttp
 import edge_tts
@@ -65,6 +69,12 @@ class JarvisMemory:
             conn.execute("INSERT INTO memory (fact_type, content) VALUES (?, ?)", (fact_type, content))
             conn.commit()
             log.info(f"🧠 Mémoire sauvegardée : [{fact_type}] {content}")
+
+    def save_task(self, task: str, due_time: str = None):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO memory (fact_type, content) VALUES ('tâche', ?)", (f"{task} (Échéance: {due_time})" if due_time else task,))
+            conn.commit()
+            log.info(f"📝 Tâche enregistrée : {task}")
 
     def query_memory(self, search_term: str) -> List[str]:
         with sqlite3.connect(self.db_path) as conn:
@@ -176,11 +186,17 @@ class VoiceActivityDetector:
         )
         self.sample_rate = sample_rate
 
-    def is_speech(self, frame: bytes, threshold: float = 0.5) -> bool:
+    def is_speech(self, frame: bytes, threshold: float = 0.5, proximity_threshold: float = 0.01) -> bool:
         """
-        Retourne True si la frame contient de la voix (probabilité > threshold).
+        Retourne True si la frame contient de la voix et respecte le seuil de proximité (gain).
         """
         audio_int16 = np.frombuffer(frame, dtype=np.int16)
+
+        # Détection de proximité via RMS (énergie audio)
+        rms = np.sqrt(np.mean(audio_int16.astype(np.float32)**2)) / 32768.0
+        if rms < proximity_threshold:
+            return False
+
         audio_float32 = audio_int16.astype(np.float32) / 32768.0
         tensor_input = torch.from_numpy(audio_float32).unsqueeze(0) # Ajout de la dimension batch
 
@@ -203,9 +219,9 @@ class SpeechToText:
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
         log.info("✅ Modèle Whisper chargé.")
 
-    async def transcribe(self, audio_frames: List[bytes]) -> str:
+    async def transcribe(self, audio_frames: List[bytes], language: str = "fr") -> str:
         """
-        Transcrit une liste de frames PCM16 en texte.
+        Transcrit une liste de frames PCM16 en texte avec support multi-langue.
         Fonctionne en thread séparé pour ne pas bloquer la boucle asyncio.
         """
         loop = asyncio.get_running_loop()
@@ -216,7 +232,7 @@ class SpeechToText:
             # faster‑whisper attend un tableau 1‑D
             segments, info = self.model.transcribe(
                 audio_np,
-                language="fr",
+                language=language,
                 task="transcribe",
                 initial_prompt="Ceci est une conversation en français uniquement. L'utilisateur parle de ses cours, de ses projets à Issoire et de musique. Ne jamais traduire en anglais.",
                 beam_size=5,
@@ -485,12 +501,50 @@ class JarvisSignals(QObject):
 
 
 # ----------------------------------------------------------------------
+# Helper: Windows Audio Ducking
+# ----------------------------------------------------------------------
+class AudioController:
+    def __init__(self):
+        try:
+            devices = AudioUtilities.GetSpeakers()
+            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            self.volume = interface.QueryInterface(IAudioEndpointVolume)
+        except Exception as e:
+            log.error(f"AudioController init error: {e}")
+            self.volume = None
+
+    def set_ducking(self, duck: bool):
+        if self.volume:
+            # Baisser à 10% (0.1) ou remettre à 100% (1.0) - attention, on suppose 1.0 par défaut
+            target = 0.1 if duck else 1.0
+            self.volume.SetMasterVolumeLevelScalar(target, None)
+
+# ----------------------------------------------------------------------
+# Helper: GPU Monitoring (NVML)
+# ----------------------------------------------------------------------
+class GpuMonitor:
+    def __init__(self):
+        try:
+            pynvml.nvmlInit()
+            self.handle = pynvml.nvmlDeviceGetHandleByIndex(0) # RTX 3070 Ti
+            self.enabled = True
+        except Exception:
+            self.enabled = False
+
+    def get_temperature(self) -> int:
+        if self.enabled:
+            return pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
+        return -1
+
+# ----------------------------------------------------------------------
 # Orchestrateur principal – boucle async
 # ----------------------------------------------------------------------
 class Jarvis:
     def __init__(self, signals: JarvisSignals = None):
         self.signals = signals
         self.memory = JarvisMemory()
+        self.audio_ctrl = AudioController()
+        self.gpu_mon = GpuMonitor()
         self.vad = VoiceActivityDetector()
         self.stt = SpeechToText()
         self.llm = LlmClient()
@@ -509,10 +563,12 @@ class Jarvis:
         # Initial context loading from memory
         context = self.memory.get_all_context()
         self.user_name = self.memory.get_user_name()
+        self.current_language = "fr"
 
         self.history = [
-            {"role": "system", "content": f"""Tu es JARVIS, un assistant personnel français intelligent et proactif.
-Tu dois TOUJOURS répondre en français. Tes réponses doivent être concises et adaptées à une interaction vocale.
+            {"role": "system", "content": f"""Tu es JARVIS, un assistant personnel intelligent et proactif.
+Tu dois TOUJOURS répondre dans la langue de l'utilisateur (Français ou Anglais).
+Tes réponses doivent être concises et adaptées à une interaction vocale.
 Ton utilisateur actuel s'appelle {self.user_name}. Utilise son nom occasionnellement pour personnaliser tes réponses.
 
 CONTEXTE MÉMOIRE (Faits dont tu dois te souvenir) :
@@ -524,7 +580,17 @@ ACTIONS DISPONIBLES (Inclus-les dans ta réponse si nécessaire) :
 - [CMD: PLAY_MUSIC('recherche')] : Pour jouer de la musique (Spotify, YouTube ou Local).
 - [CMD: SAVE_FACT('type', 'contenu')] : Pour mémoriser une information importante.
 - [CMD: DELETE_FACT('recherche')] : Pour supprimer un fait de la mémoire.
+- [CMD: SAVE_TASK('tâche', 'échéance')] : Pour enregistrer une tâche à faire.
+- [CMD: SWITCH_LANG('fr' ou 'en')] : Pour changer la langue de transcription.
+- [CMD: GET_GPU_TEMP()] : Pour afficher la température du GPU.
+- [CMD: SPLIT_SCREEN('app1', 'app2')] : Pour aligner deux fenêtres en côte à côte.
+- [CMD: WORK_MODE()] : Pour lancer VS Code, Spotify et ouvrir un PDF de cours.
+- [CMD: GET_WEATHER('ville')] : Pour obtenir la météo.
+- [CMD: CALC_TRIP('départ', 'arrivée')] : Pour calculer un temps de trajet.
 - [CMD: MIDI('commande')] : Placeholder pour le contrôle musical.
+
+AUTO-CORRECTION : Si l'utilisateur envoie une erreur de code, analyse-la et propose un correctif.
+RAG (Cours) : Utilise les faits en mémoire pour aider l'utilisateur dans ses révisions (NSI/Maths).
 
 Exemple : "Tout de suite, {self.user_name}, je lance votre playlist son triste. [CMD: PLAY_MUSIC('son triste')]"
 """}
@@ -573,7 +639,9 @@ Exemple : "Tout de suite, {self.user_name}, je lance votre playlist son triste. 
                         self._is_speaking = False
                         # Fin d'énoncé : on transmet le buffer
                         if self._speech_buffer:
-                            transcript = await self.stt.transcribe(self._speech_buffer)
+                            self.audio_ctrl.set_ducking(True)
+                            transcript = await self.stt.transcribe(self._speech_buffer, language=self.current_language)
+                            self.audio_ctrl.set_ducking(False)
                             if transcript:
                                 log.info(f"🗣️ Transcription : {transcript}")
                             if self.signals:
@@ -747,6 +815,39 @@ Exemple : "Tout de suite, {self.user_name}, je lance votre playlist son triste. 
                 self.memory.save_memory(args[0], args[1])
             elif cmd_name == "DELETE_FACT":
                 self.memory.delete_memory(args[0])
+            elif cmd_name == "SAVE_TASK":
+                self.memory.save_task(args[0], args[1] if len(args) > 1 else None)
+            elif cmd_name == "SWITCH_LANG":
+                self.current_language = args[0].lower()
+                log.info(f"🌐 Langue changée pour : {self.current_language}")
+            elif cmd_name == "GET_GPU_TEMP":
+                temp = self.gpu_mon.get_temperature()
+                log.info(f"🔥 Température GPU : {temp}°C")
+            elif cmd_name == "SPLIT_SCREEN" and len(args) >= 2:
+                # Aligner deux fenêtres (logique rudimentaire)
+                try:
+                    import pygetwindow as gw
+                    windows = gw.getAllWindows()
+                    # On cherche les fenêtres dont le titre contient le nom de l'app
+                    w1 = [w for w in windows if args[0].lower() in w.title.lower()]
+                    w2 = [w for w in windows if args[1].lower() in w.title.lower()]
+                    if w1 and w2:
+                        w1[0].restore(); w1[0].moveTo(0, 0); w1[0].resizeTo(960, 1080)
+                        w2[0].restore(); w2[0].moveTo(960, 0); w2[0].resizeTo(960, 1080)
+                except Exception as e:
+                    log.error(f"Split screen error: {e}")
+            elif cmd_name == "WORK_MODE":
+                log.info("💼 Activation du Mode Travail")
+                os.system("start code") # VS Code
+                self._execute_command("[CMD: PLAY_MUSIC('son triste')]")
+                # Recherche d'un PDF dans Issoire (exemple)
+                os.system(f"start {os.path.join('C:', 'Users', self.user_name, 'Documents', 'cours.pdf')}")
+            elif cmd_name == "GET_WEATHER":
+                log.info(f"☀️ Récupération météo pour {args[0]}...")
+                webbrowser.open(f"https://www.google.com/search?q=meteo+{args[0]}")
+            elif cmd_name == "CALC_TRIP":
+                log.info(f"🚗 Calcul trajet : {args[0]} -> {args[1]}")
+                webbrowser.open(f"https://www.google.com/maps/dir/{args[0]}/{args[1]}")
             elif cmd_name == "MIDI":
                 log.info(f"🎹 MIDI Placeholder: {args[0]}")
         except Exception as e:
