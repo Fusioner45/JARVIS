@@ -1,15 +1,7 @@
-# --- Base Infrastructure ---
 aiohttp==3.9.1
 python-dotenv==1.0.1
 numpy==1.26.4
-
-# --- CPU Runtime (Mandatory) ---
-torch==2.2.1
-torchvision==0.17.1
-torchaudio==2.2.1
 onnxruntime==1.17.0
-
-# --- Perception & Voice ---
 faster-whisper==0.10.0
 pvporcupine==3.0.0
 pvrecorder==1.2.1
@@ -17,11 +9,7 @@ sounddevice==0.4.6
 soundfile==0.12.1
 pydub==0.25.1
 edge-tts==6.1.9
-
-# --- Intelligence & Document Processing ---
 pypdf==4.0.1
-
-# --- UI & Windows Automation ---
 PyQt6==6.6.1
 pyautogui==0.9.54
 pygetwindow==0.0.9

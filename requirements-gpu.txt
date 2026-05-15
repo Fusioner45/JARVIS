@@ -1,4 +1,3 @@
-# --- GPU Accelerations (CUDA 12.1 Only) ---
 torch==2.2.1+cu121
 torchvision==0.17.1+cu121
 torchaudio==2.2.1+cu121
