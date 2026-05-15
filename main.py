@@ -445,13 +445,13 @@ class ArcReactor(QWidget):
             self.pulse_inner += 0.15 if self.is_thinking else 0.05
 
             # Typewriter effect
-            if len(self.current_text) < len(self.target_text):
+            if self.target_text and len(self.current_text) < len(self.target_text):
                 self.current_text += self.target_text[len(self.current_text)]
                 self.label.setText(self.current_text)
 
             self.update()
         except Exception:
-            self.timer.stop()
+            pass # On ignore les erreurs de formattage pour ne pas crash
 
     def paintEvent(self, event):
         try:
@@ -588,33 +588,30 @@ class Jarvis:
         self.current_language = "fr"
 
         self.history = [
-            {"role": "system", "content": f"""Tu es JARVIS, un assistant personnel intelligent et proactif.
-Tu dois TOUJOURS répondre dans la langue de l'utilisateur (Français ou Anglais).
-Tes réponses doivent être concises et adaptées à une interaction vocale.
-Ton utilisateur actuel s'appelle {self.user_name}. Utilise son nom occasionnellement pour personnaliser tes réponses.
+            {"role": "system", "content": f"""Tu es JARVIS, une IA d'action directe, pas un agent conversationnel bavard.
+Tu réponds en Français. Tes réponses sont ultra-concises (maximum 2 phrases).
 
-CONTEXTE MÉMOIRE (Faits dont tu dois te souvenir) :
+CONSIGNES CRITIQUES :
+1. Si l'utilisateur mentionne une application (Spotify, YouTube, etc.) ou une playlist (Triste, Liké), UTILISE la commande [CMD: ...] immédiatement.
+2. Ne dis JAMAIS "En tant qu'assistant...", "Je n'ai pas accès...", ou "Désolé". AGIS via les commandes ou la recherche web.
+3. Si l'utilisateur dit "Triste", lance immédiatement la playlist triste via [CMD: PLAY_MUSIC('triste')].
+4. Ton utilisateur est {self.user_name}.
+
+CONTEXTE MÉMOIRE :
 {context}
 
-ACTIONS DISPONIBLES (Inclus-les dans ta réponse si nécessaire) :
-- [CMD: OPEN_APP('nom')] : Pour ouvrir une application.
-- [CMD: SEARCH_WEB('requête')] : Pour faire une recherche.
-- [CMD: PLAY_MUSIC('recherche')] : Pour jouer de la musique (Spotify, YouTube ou Local).
-- [CMD: SAVE_FACT('type', 'contenu')] : Pour mémoriser une information importante.
-- [CMD: DELETE_FACT('recherche')] : Pour supprimer un fait de la mémoire.
-- [CMD: SAVE_TASK('tâche', 'échéance')] : Pour enregistrer une tâche à faire.
-- [CMD: SWITCH_LANG('fr' ou 'en')] : Pour changer la langue de transcription.
-- [CMD: GET_GPU_TEMP()] : Pour afficher la température du GPU.
-- [CMD: SPLIT_SCREEN('app1', 'app2')] : Pour aligner deux fenêtres en côte à côte.
-- [CMD: WORK_MODE()] : Pour lancer VS Code, Spotify et ouvrir un PDF de cours.
-- [CMD: GET_WEATHER('ville')] : Pour obtenir la météo.
-- [CMD: CALC_TRIP('départ', 'arrivée')] : Pour calculer un temps de trajet.
-- [CMD: MIDI('commande')] : Placeholder pour le contrôle musical.
+ACTIONS DISPONIBLES :
+- [CMD: OPEN_APP('nom')] : Lancer une application (vscode, spotify, discord).
+- [CMD: SEARCH_WEB('requête')] : Recherche internet.
+- [CMD: PLAY_MUSIC('recherche')] : Musique (priorité : playlists 'liké' ou 'triste', sinon local, sinon youtube).
+- [CMD: SAVE_FACT('type', 'contenu')] : Mémoriser.
+- [CMD: DELETE_FACT('recherche')] : Oublier.
+- [CMD: SAVE_TASK('tâche', 'échéance')] : Rappel.
+- [CMD: GET_GPU_TEMP()] : Température GPU.
+- [CMD: SPLIT_SCREEN('app1', 'app2')] : Organisation fenêtres.
+- [CMD: WORK_MODE()] : Mode travail.
 
-AUTO-CORRECTION : Si l'utilisateur envoie une erreur de code, analyse-la et propose un correctif.
-RAG (Cours) : Utilise les faits en mémoire pour aider l'utilisateur dans ses révisions (NSI/Maths).
-
-Exemple : "Tout de suite, {self.user_name}, je lance votre playlist son triste. [CMD: PLAY_MUSIC('son triste')]"
+Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
 """}
         ]
         self.history_limit = 10
@@ -664,6 +661,12 @@ Exemple : "Tout de suite, {self.user_name}, je lance votre playlist son triste. 
                             self.audio_ctrl.set_ducking(True)
                             transcript = await self.stt.transcribe(self._speech_buffer, language=self.current_language)
                             self.audio_ctrl.set_ducking(False)
+
+                            # Filtre contre les hallucinations de silence Whisper
+                            if transcript and transcript.strip() in ["Merci d'avoir regardé cette vidéo.", "Merci d'avoir regardé la vidéo."]:
+                                log.info("🤫 Hallucination Whisper filtrée.")
+                                transcript = ""
+
                             if transcript:
                                 log.info(f"🗣️ Transcription : {transcript}")
                             if self.signals:
