@@ -23,15 +23,11 @@ echo.
 echo [JARVIS] Mise a jour de pip...
 python -m pip install --upgrade pip --quiet
 
-echo [JARVIS] Etape 1 : Installation des dependances Core (CPU initial pass)...
-pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+echo [JARVIS] Etape 1 : Installation des dependances Core (requirements.txt)...
+pip install -r requirements.txt
 
 echo.
 echo [JARVIS] Etape 2 : Installation de PyTorch GPU (CUDA 12.1)...
-pip install torch==2.2.1+cu121 torchvision==0.17.1+cu121 torchaudio==2.2.1+cu121 --index-url https://download.pytorch.org/whl/cu121
-
-echo.
-echo [JARVIS] Etape 3 : Installation des dependances GPU (requirements-gpu.txt)...
 pip install -r requirements-gpu.txt --index-url https://download.pytorch.org/whl/cu121
 
 echo.

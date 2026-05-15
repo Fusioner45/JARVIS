@@ -1,4 +1,4 @@
-# --- JARVIS CORE CPU ---
+# --- JARVIS CORE ---
 aiohttp==3.9.1
 python-dotenv==1.0.1
 numpy==1.26.4
@@ -16,8 +16,3 @@ pyautogui==0.9.54
 pygetwindow==0.0.9
 pycaw==2.0.1
 comtypes==1.2.0
-
-# Standard CPU IA Stack (Strictly CPU)
-torch==2.2.1+cpu
-torchvision==0.17.1+cpu
-torchaudio==2.2.1+cpu
