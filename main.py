@@ -4,8 +4,11 @@ import logging
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QThread
 
+from dotenv import load_dotenv
 from jarvis.core.orchestrator import Jarvis
 from jarvis.ui.hud import ArcReactor, JarvisSignals
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,

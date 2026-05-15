@@ -1,29 +1,30 @@
-# JARVIS - Core Dependencies (Standard Pip)
+# --- Base Infrastructure ---
+aiohttp==3.9.1
+python-dotenv==1.0.1
+numpy==1.26.4
 
-# --- Network & Async ---
-aiohttp
-python-dotenv
+# --- CPU Runtime (Mandatory) ---
+torch==2.2.1
+torchvision==0.17.1
+torchaudio==2.2.1
+onnxruntime==1.17.0
 
-# --- Data & AI Runtimes ---
-numpy
-onnxruntime-gpu
+# --- Perception & Voice ---
+faster-whisper==0.10.0
+pvporcupine==3.0.0
+pvrecorder==1.2.1
+sounddevice==0.4.6
+soundfile==0.12.1
+pydub==0.25.1
+edge-tts==6.1.9
 
-# --- Audio & Voice ---
-faster-whisper
-pvporcupine
-pvrecorder
-sounddevice
-soundfile
-pydub
-edge-tts
-
-# --- Intelligence & PDF ---
-pypdf
+# --- Intelligence & Document Processing ---
+pypdf==4.0.1
 
 # --- UI & Windows Automation ---
-PyQt6
-pyautogui
-pygetwindow
-pycaw
-comtypes
-pynvml
+PyQt6==6.6.1
+pyautogui==0.9.54
+pygetwindow==0.0.9
+pycaw==2.0.1
+comtypes==1.2.0
+pynvml==11.5.0
