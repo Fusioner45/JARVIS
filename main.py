@@ -24,6 +24,7 @@ import sqlite3
 import threading
 import time
 import subprocess
+import queue
 from collections import deque
 from typing import AsyncGenerator, List, Dict, Any
 
@@ -59,27 +60,29 @@ class JarvisMemory:
 
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS memory (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    fact_type TEXT,
-                    content TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+            # Activation FTS5 pour recherche sémantique performante
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(fact_type, content, timestamp, expires_at)")
+            # Table classique pour méta-données si besoin, mais on va tout mettre dans FTS5 pour cet usage
             conn.commit()
 
-    def save_memory(self, fact_type: str, content: str):
+    def cleanup_obsolete(self):
+        """Supprime les faits expirés."""
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("INSERT INTO memory (fact_type, content) VALUES (?, ?)", (fact_type, content))
+            now = time.time()
+            conn.execute("DELETE FROM memory_fts WHERE expires_at IS NOT NULL AND expires_at < ?", (now,))
             conn.commit()
-            log.info(f"🧠 Mémoire sauvegardée : [{fact_type}] {content}")
+
+    def save_memory(self, fact_type: str, content: str, ttl_days: int = None):
+        expires_at = time.time() + (ttl_days * 86400) if ttl_days else None
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO memory_fts (fact_type, content, timestamp, expires_at) VALUES (?, ?, ?, ?)",
+                         (fact_type, content, time.time(), expires_at))
+            conn.commit()
+            log.info(f"🧠 Mémoire FTS5 : [{fact_type}] {content}")
 
     def save_task(self, task: str, due_time: str = None):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("INSERT INTO memory (fact_type, content) VALUES ('tâche', ?)", (f"{task} (Échéance: {due_time})" if due_time else task,))
-            conn.commit()
-            log.info(f"📝 Tâche enregistrée : {task}")
+        # Les tâches expirent par défaut après 7 jours si non précisé
+        self.save_memory("tâche", f"{task} (Due: {due_time})" if due_time else task, ttl_days=7)
 
     def index_pdf(self, pdf_path: str):
         """Extrait le texte d'un PDF et le stocke comme 'cours'."""
@@ -95,8 +98,8 @@ class JarvisMemory:
                 with sqlite3.connect(self.db_path) as conn:
                     file_name = os.path.basename(pdf_path)
                     for i, chunk in enumerate(chunks):
-                        conn.execute("INSERT INTO memory (fact_type, content) VALUES (?, ?)",
-                                     (f"cours:{file_name}", chunk))
+                        conn.execute("INSERT INTO memory_fts (fact_type, content, timestamp) VALUES (?, ?, ?)",
+                                     (f"cours:{file_name}", chunk, time.time()))
                     conn.commit()
             log.info(f"📚 PDF indexé : {pdf_path}")
         except Exception as e:
@@ -104,30 +107,32 @@ class JarvisMemory:
 
     def query_memory(self, search_term: str) -> List[str]:
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT content FROM memory WHERE content LIKE ? OR fact_type LIKE ?",
-                                 (f"%{search_term}%", f"%{search_term}%"))
+            # Recherche FTS5 optimisée
+            cursor = conn.execute("SELECT content FROM memory_fts WHERE content MATCH ? OR fact_type MATCH ?",
+                                 (search_term, search_term))
             return [row[0] for row in cursor.fetchall()]
 
     def delete_memory(self, search_term: str):
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM memory WHERE content LIKE ? OR fact_type LIKE ?",
-                         (f"%{search_term}%", f"%{search_term}%"))
+            conn.execute("DELETE FROM memory_fts WHERE content MATCH ? OR fact_type MATCH ?",
+                         (search_term, search_term))
             conn.commit()
-            log.info(f"🗑️ Mémoire supprimée pour : {search_term}")
+            log.info(f"🗑️ Mémoire supprimée : {search_term}")
 
     def get_all_context(self) -> str:
         """Récupère un résumé de tous les faits pour le prompt système."""
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT fact_type, content FROM memory ORDER BY timestamp DESC LIMIT 20")
+            self.cleanup_obsolete() # On nettoie avant de charger
+            cursor = conn.execute("SELECT fact_type, content FROM memory_fts ORDER BY timestamp DESC LIMIT 20")
             facts = [f"- {ft}: {c}" for ft, c in cursor.fetchall()]
             return "\n".join(facts) if facts else "Aucun fait mémorisé pour le moment."
 
     def get_user_name(self) -> str:
         """Cherche le nom de l'utilisateur dans la mémoire."""
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT content FROM memory WHERE fact_type = 'nom_utilisateur' LIMIT 1")
+            cursor = conn.execute("SELECT content FROM memory_fts WHERE fact_type = 'nom_utilisateur' LIMIT 1")
             row = cursor.fetchone()
-            return row[0] if row else "Utilisateur"
+            return row[0] if row else "Fusion"
 
 # ----------------------------------------------------------------------
 # Audio / Playlists
@@ -138,8 +143,9 @@ PLAYLISTS = {
 }
 
 # ----------------------------------------------------------------------
-# Command Mappings & Allowed Tags
+# Command Mappings & Allowed Tags (Security & Mapping)
 # ----------------------------------------------------------------------
+# Whitelist des commandes autorisées
 ALLOWED_COMMANDS = [
     "OPEN_APP", "SEARCH_WEB", "PLAY_MUSIC",
     "SAVE_FACT", "DELETE_FACT", "SAVE_TASK",
@@ -148,12 +154,14 @@ ALLOWED_COMMANDS = [
     "SET_VOICE_MORPH", "INDEX_PDF", "SCREENSHOT_ANALYZE", "HA_CONTROL"
 ]
 
-APP_MAPPING = {
+# Mapping sécurisé des applications vers des chemins absolus ou alias vérifiés
+APP_WHITELIST = {
+    "vscode": r"C:\Users\Fusion\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+    "spotify": r"C:\Users\Fusion\AppData\Roaming\Spotify\Spotify.exe",
+    "discord": r"C:\Users\Fusion\AppData\Local\Discord\Update.exe",
+    "chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    "calculatrice": "calc.exe",
     "youtube": "https://youtube.com",
-    "spotify": "spotify",
-    "vscode": "code",
-    "discord": "discord",
-    "calculatrice": "calc"
 }
 
 # ----------------------------------------------------------------------
@@ -387,12 +395,12 @@ class TextToSpeech:
 
     async def speak(self, text: str, audio_queue: asyncio.Queue):
         """
-        Lit le texte à voix haute grâce à edge‑tts.
-        Accumule tout l'audio d'une phrase avant de le décoder pour éviter les erreurs FFMPEG.
+        Lit le texte à voix haute grâce à edge‑tts avec gestion d'état is_speaking.
         """
         if not text:
             return
 
+        Jarvis.is_speaking = True
         communicate = edge_tts.Communicate(text, voice=self.voice)
         mp3_data = io.BytesIO()
 
@@ -420,6 +428,7 @@ class TextToSpeech:
             if self.use_morphing:
                 pcm_array = await loop.run_in_executor(None, VoiceMorpher.apply_robot_filter, pcm_array, SAMPLE_RATE)
             await audio_queue.put(pcm_array)
+            # On laisse is_speaking à True tant que la queue n'est pas vide (géré par le run)
 
 
 # ----------------------------------------------------------------------
@@ -469,19 +478,24 @@ class ArcReactor(QWidget):
         self.timer.start(20) # 50 FPS
 
     def animate(self):
+        """Animation cycle with extreme safety checks."""
         try:
+            if not hasattr(self, 'label') or self.label is None:
+                return
+
             # Rotation ring
             self.angle_outer = (self.angle_outer + (4 if self.is_thinking else 1)) % 360
             self.pulse_inner += 0.15 if self.is_thinking else 0.05
 
             # Typewriter effect
-            if self.target_text and len(self.current_text) < len(self.target_text):
-                self.current_text += self.target_text[len(self.current_text)]
-                self.label.setText(self.current_text)
+            if hasattr(self, 'target_text') and self.target_text:
+                if len(self.current_text) < len(self.target_text):
+                    self.current_text += self.target_text[len(self.current_text)]
+                    self.label.setText(self.current_text)
 
             self.update()
-        except Exception:
-            pass # On ignore les erreurs de formattage pour ne pas crash
+        except Exception as e:
+            log.debug(f"UI Animate error suppressed: {e}")
 
     def paintEvent(self, event):
         try:
@@ -586,19 +600,31 @@ class VoiceMorpher:
 # ----------------------------------------------------------------------
 class AudioController:
     def __init__(self):
+        from ctypes import cast, POINTER
         try:
             devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            self.volume = interface.QueryInterface(IAudioEndpointVolume)
+            self.interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            self.volume = cast(self.interface, POINTER(IAudioEndpointVolume))
         except Exception as e:
-            log.error(f"AudioController init error: {e}")
+            log.warning(f"AudioController (PyCAW) failed: {e}. Using PowerShell Fallback.")
             self.volume = None
 
     def set_ducking(self, duck: bool):
         if self.volume:
-            # Baisser à 10% (0.1) ou remettre à 100% (1.0) - attention, on suppose 1.0 par défaut
-            target = 0.1 if duck else 1.0
-            self.volume.SetMasterVolumeLevelScalar(target, None)
+            try:
+                target = 0.1 if duck else 1.0
+                self.volume.SetMasterVolumeLevelScalar(target, None)
+                return
+            except Exception:
+                pass
+
+        # Fallback PowerShell (Slower but reliable)
+        try:
+            vol = 10 if duck else 100
+            subprocess.run(["powershell", "-Command", f"(Get-WmiObject -Class Win32_AudioControl).SetVolume({vol})"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
 # ----------------------------------------------------------------------
 # Helper: Wake-Word Detection (Picovoice Porcupine)
@@ -622,6 +648,49 @@ class WakeWordDetector:
             self.recorder.stop()
 
 # ----------------------------------------------------------------------
+# Helper: Command Executor (Zero-Trust)
+# ----------------------------------------------------------------------
+class CommandExecutor:
+    """Exécute des commandes système avec validation stricte et sans shell."""
+
+    @staticmethod
+    def safe_execute(cmd_name: str, args: List[str]):
+        # Caractères interdits pour prévenir l'injection (même si shell=False, par précaution)
+        forbidden = [';', '&', '|', '$', '>', '<', '`']
+        for arg in args:
+            if any(char in arg for char in forbidden):
+                log.error(f"🚨 Tentative d'injection détectée dans l'argument : {arg}")
+                return
+
+        if cmd_name == "OPEN_APP":
+            app_id = args[0].lower()
+            if app_id in APP_WHITELIST:
+                target = APP_WHITELIST[app_id]
+                if target.startswith("http"):
+                    log.info(f"🌐 Ouverture Web : {target}")
+                    webbrowser.open(target)
+                else:
+                    log.info(f"🚀 Lancement App : {target}")
+                    # Utilisation de subprocess.Popen sans shell pour la sécurité
+                    subprocess.Popen([target], shell=False)
+            else:
+                log.warning(f"⚠️ Application non autorisée : {app_id}")
+
+        elif cmd_name == "SEARCH_WEB":
+            query = args[0]
+            log.info(f"🔍 Recherche Web : {query}")
+            webbrowser.open(f"https://www.google.com/search?q={query}")
+
+        elif cmd_name == "START_FILE":
+            # Pour l'ouverture de dossiers ou fichiers locaux validés
+            path = args[0]
+            if os.path.exists(path) and path.startswith(r"C:"):
+                log.info(f"📂 Ouverture Fichier/Dossier : {path}")
+                os.startfile(path)
+            else:
+                log.error(f"🚨 Accès refusé ou chemin inexistant : {path}")
+
+# ----------------------------------------------------------------------
 # Helper: GPU Monitoring (NVML)
 # ----------------------------------------------------------------------
 class GpuMonitor:
@@ -642,6 +711,9 @@ class GpuMonitor:
 # Orchestrateur principal – boucle async
 # ----------------------------------------------------------------------
 class Jarvis:
+    # État global partagé pour éviter le Larsen
+    is_speaking = False
+
     def __init__(self, signals: JarvisSignals = None):
         self.signals = signals
         self.memory = JarvisMemory()
@@ -658,9 +730,8 @@ class Jarvis:
         self._silence_count = 0
         self._is_speaking = False
 
-        # Audio output synchronization
-        self._audio_thread_lock = threading.Lock()
-        self._current_audio_chunk = np.array([], dtype=np.int16)
+        # Audio output - Producteur-Consommateur (Glitch-Free)
+        self.output_queue = queue.Queue(maxsize=100)
 
         # Initial context loading from memory
         context = self.memory.get_all_context()
@@ -668,14 +739,15 @@ class Jarvis:
         self.current_language = "fr"
 
         self.history = [
-            {"role": "system", "content": f"""Tu es JARVIS, une IA d'action directe, pas un agent conversationnel bavard.
+            {"role": "system", "content": f"""Tu es JARVIS, une IA 'Action-First'. Ton but est d'exécuter des commandes, pas de discuter inutilement.
 Tu réponds en Français. Tes réponses sont ultra-concises (maximum 2 phrases).
 
-CONSIGNES CRITIQUES :
-1. Si l'utilisateur mentionne une application (Spotify, YouTube, etc.) ou une playlist (Triste, Liké), UTILISE la commande [CMD: ...] immédiatement.
-2. Ne dis JAMAIS "En tant qu'assistant...", "Je n'ai pas accès...", ou "Désolé". AGIS via les commandes ou la recherche web.
-3. Si l'utilisateur dit "Triste", lance immédiatement la playlist triste via [CMD: PLAY_MUSIC('triste')].
-4. Ton utilisateur est {self.user_name}.
+CONSIGNES CRITIQUES (Priorité Absolue) :
+1. Chaque fois qu'une action est possible, inclus SYSTÉMATIQUEMENT la balise [CMD: ...].
+2. Ne fais JAMAIS de disclaimer ("En tant qu'IA...", "Je n'ai pas accès..."). Si tu ne sais pas, utilise [CMD: SEARCH_WEB(...)].
+3. Si l'utilisateur mentionne une app ou un outil (Calculatrice, Spotify, etc.), génère la commande immédiatement.
+4. Si l'utilisateur dit "Triste", génère [CMD: PLAY_MUSIC('triste')].
+5. Ton utilisateur est {self.user_name}.
 
 CONTEXTE MÉMOIRE :
 {context}
@@ -702,13 +774,20 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
 
     async def _audio_listener(self) -> AsyncGenerator[str, None]:
         """
-        Écoute en continu le microphone, applique le VAD,
-        et yield une transcription dès qu'une fin d'énoncé est détectée.
+        Écoute en continu le microphone avec verrou anti-Larsen.
         """
+        start_time = 0
         async for frame in audio_frame_generator():
+            # ANTI-LARSEN : Si Jarvis parle, on jette l'audio
+            if Jarvis.is_speaking:
+                self._speech_buffer = []
+                continue
+
             is_speech = self.vad.is_speech(frame)
 
             if is_speech:
+                if not self._is_speaking:
+                    start_time = time.time()
                 if not self._is_speaking:
                     log.info("🎤 Début de parole détecté")
                     self._is_speaking = True
@@ -742,13 +821,15 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
                         self._is_speaking = False
                         # Fin d'énoncé : on transmet le buffer
                         if self._speech_buffer:
+                            duration = time.time() - start_time
                             self.audio_ctrl.set_ducking(True)
                             transcript = await self.stt.transcribe(self._speech_buffer, language=self.current_language)
                             self.audio_ctrl.set_ducking(False)
 
-                            # Filtre contre les hallucinations de silence Whisper
-                            if transcript and transcript.strip() in ["Merci d'avoir regardé cette vidéo.", "Merci d'avoir regardé la vidéo."]:
-                                log.info("🤫 Hallucination Whisper filtrée.")
+                            # WHISPER HALLUCINATION FILTER (Duration + Keywords)
+                            hallucinations = ["Merci d'avoir regardé", "Bye", "C'est tout", "S'abonner", "vidéo"]
+                            if duration < 1.5 and any(h.lower() in transcript.lower() for h in hallucinations):
+                                log.info(f"🤫 Hallucination filtrée ({duration:.1f}s) : {transcript}")
                                 transcript = ""
 
                             if transcript:
@@ -786,22 +867,18 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
         # File d'attente pour l'audio PCM à jouer
         self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
 
-        # Stream sounddevice avec callback pour une lecture fluide sans stuttering
+        # Stream sounddevice avec callback non-bloquant (Glitch-Free)
         def audio_callback(outdata, frames, time, status):
             if status:
                 log.warning(f"Audio output status: {status}")
 
-            # On essaie de récupérer de la donnée du buffer interne
-            data = self._get_next_audio_chunk(frames)
-            if data is not None:
-                outdata[:len(data), 0] = data
-                if len(data) < frames:
-                    outdata[len(data):, 0] = 0
-            else:
+            try:
+                # On essaie de récupérer un bloc prêt de la queue
+                data = self.output_queue.get_nowait()
+                outdata[:, 0] = data
+            except queue.Empty:
+                # Pas de données ? On remplit de silence (non-bloquant)
                 outdata.fill(0)
-
-        # Buffer interne pour le callback
-        self._current_audio_chunk = np.array([], dtype=np.int16)
 
         output_stream = sd.OutputStream(
             samplerate=SAMPLE_RATE,
@@ -820,6 +897,10 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
                 # On concatène au buffer interne
                 self._append_audio_chunk(chunk)
                 self.audio_queue.task_done()
+
+                # S'il n'y a plus rien à dire, on libère le micro
+                if self.audio_queue.empty():
+                    Jarvis.is_speaking = False
 
         worker_task = asyncio.create_task(audio_worker())
 
@@ -865,97 +946,76 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
             log.info("🔌 Session Ollama fermée.")
 
     def _append_audio_chunk(self, chunk):
-        with self._audio_thread_lock:
-            if self._current_audio_chunk.size == 0:
-                self._current_audio_chunk = chunk
-            else:
-                self._current_audio_chunk = np.concatenate([self._current_audio_chunk, chunk])
-
-    def _get_next_audio_chunk(self, frames):
-        with self._audio_thread_lock:
-            if self._current_audio_chunk.size == 0:
-                return None
-
-            take = min(frames, self._current_audio_chunk.size)
-            chunk = self._current_audio_chunk[:take]
-            self._current_audio_chunk = self._current_audio_chunk[take:]
-            return chunk
+        """Découpe et envoie les données dans la queue synchrone."""
+        # On découpe en blocs de taille FRAME_SIZE pour le callback
+        for i in range(0, len(chunk), FRAME_SIZE):
+            segment = chunk[i:i + FRAME_SIZE]
+            if len(segment) < FRAME_SIZE:
+                # Padding silence si dernier bloc trop petit
+                pad = np.zeros(FRAME_SIZE - len(segment), dtype=np.int16)
+                segment = np.concatenate([segment, pad])
+            try:
+                self.output_queue.put(segment, block=False)
+            except queue.Full:
+                break
 
     def _clear_audio_buffer(self):
-        with self._audio_thread_lock:
-            self._current_audio_chunk = np.array([], dtype=np.int16)
+        """Vide la file d'attente audio immédiatement."""
+        while not self.output_queue.empty():
+            try:
+                self.output_queue.get_nowait()
+            except queue.Empty:
+                break
 
     def _execute_command(self, cmd_tag: str):
-        """Analyse et exécute un tag [CMD: ...]."""
+        """Parse et exécute un bloc [CMD: ...]."""
         try:
-            # Extraction du nom de la commande et de ses arguments
-            content = cmd_tag.replace("[CMD:", "").replace("]", "").strip()
-            # On cherche qqc comme OPEN_APP('spotify')
-            match = re.match(r"(\w+)\((.*)\)", content)
-            if not match: return
+            # 1. Nettoyage déterministe du bloc
+            inner = cmd_tag.strip()
+            if inner.startswith("[CMD:"): inner = inner[5:]
+            if inner.endswith("]"): inner = inner[:-1]
+            inner = inner.strip()
 
-            cmd_name = match.group(1)
+            # 2. Extraction du nom et des arguments via un parseur d'état simple
+            if "(" not in inner: return
+            cmd_name = inner.split("(")[0].strip()
+            raw_args = inner[len(cmd_name):].strip("() ")
 
-            # FILTRAGE : Si la commande n'est pas autorisée, on l'ignore
+            # Split des arguments en gérant les quotes
+            args = [a.strip().strip("'\"") for a in raw_args.split(",") if a.strip()]
+
+            # 3. Filtrage Whitelist
             if cmd_name not in ALLOWED_COMMANDS:
-                log.warning(f"⚠️ Commande ignorée (non définie) : {cmd_name}")
+                log.warning(f"⚠️ Commande rejetée (Hors Whitelist) : {cmd_name}")
                 return
 
-            # Nettoyage rudimentaire des quotes
-            args = [a.strip().strip("'").strip('"') for a in match.group(2).split(",")]
+            log.info(f"⚙️ Action : {cmd_name}({args})")
 
-            log.info(f"🚀 Exécution commande : {cmd_name} avec args {args}")
-
+            # 4. Dispatching vers les Handlers
             if cmd_name == "OPEN_APP":
-                app_query = args[0].lower()
-                target = APP_MAPPING.get(app_query, args[0])
+                CommandExecutor.safe_execute("OPEN_APP", args)
+                if "spotify" in args[0].lower():
+                    threading.Thread(target=lambda: (time.sleep(3), pyautogui.press('enter')), daemon=True).start()
 
-                # Si c'est une URL
-                if target.startswith("http"):
-                    webbrowser.open(target)
-                else:
-                    os.system(f"start {target}")
-
-                if "spotify" in app_query:
-                    # Petite automatisation pour lancer la lecture
-                    def _spotify_play():
-                        time.sleep(3)
-                        pyautogui.press('enter')
-                    threading.Thread(target=_spotify_play, daemon=True).start()
             elif cmd_name == "SEARCH_WEB":
-                webbrowser.open(f"https://www.google.com/search?q={args[0]}")
+                CommandExecutor.safe_execute("SEARCH_WEB", args)
+
             elif cmd_name == "PLAY_MUSIC":
                 query = args[0].lower()
                 target_url = None
                 is_local = False
-
-                # Étape 1 : Vérification des mots-clés Spotify
                 for keyword, url in PLAYLISTS.items():
                     if keyword in query:
-                        target_url = url
-                        break
-
-                # Étape 2 : Vérification Local (si pas de playlist trouvée)
-                if not target_url:
-                    if any(word in query for word in ["local", "mon pc", "ordinateur", "hors ligne"]):
-                        is_local = True
-
-                # Étape 3 : Fallback YouTube (si ni playlist ni local)
-                if not target_url and not is_local:
-                    target_url = f"https://www.youtube.com/results?search_query={args[0]}"
+                        target_url = url; break
+                if not target_url and any(w in query for w in ["local", "mon pc", "ordinateur"]):
+                    is_local = True
 
                 if is_local:
-                    log.info("📂 Ouverture musique locale C:\\musique")
-                    os.startfile(r'C:\musique')
-                elif target_url:
-                    log.info(f"🌐 Ouverture URL Musique : {target_url}")
-                    webbrowser.open(target_url)
-                    # Stark Touch: Automatique Play après chargement (5s)
-                    def _music_auto_play():
-                        time.sleep(5)
-                        pyautogui.press('space')
-                        log.info("🎹 Stark Touch: Spacebar pressed")
-                    threading.Thread(target=_music_auto_play, daemon=True).start()
+                    CommandExecutor.safe_execute("START_FILE", [r'C:\musique'])
+                else:
+                    url = target_url or f"https://www.youtube.com/results?search_query={args[0]}"
+                    webbrowser.open(url)
+                    threading.Thread(target=lambda: (time.sleep(5), pyautogui.press('space')), daemon=True).start()
 
             elif cmd_name == "SAVE_FACT" and len(args) >= 2:
                 self.memory.save_memory(args[0], args[1])
@@ -965,49 +1025,38 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
                 self.memory.save_task(args[0], args[1] if len(args) > 1 else None)
             elif cmd_name == "SWITCH_LANG":
                 self.current_language = args[0].lower()
-                log.info(f"🌐 Langue changée pour : {self.current_language}")
             elif cmd_name == "GET_GPU_TEMP":
                 temp = self.gpu_mon.get_temperature()
                 log.info(f"🔥 Température GPU : {temp}°C")
             elif cmd_name == "SPLIT_SCREEN" and len(args) >= 2:
-                # Aligner deux fenêtres (logique rudimentaire)
                 try:
-                    import pygetwindow as gw
                     windows = gw.getAllWindows()
-                    # On cherche les fenêtres dont le titre contient le nom de l'app
                     w1 = [w for w in windows if args[0].lower() in w.title.lower()]
                     w2 = [w for w in windows if args[1].lower() in w.title.lower()]
                     if w1 and w2:
                         w1[0].restore(); w1[0].moveTo(0, 0); w1[0].resizeTo(960, 1080)
                         w2[0].restore(); w2[0].moveTo(960, 0); w2[0].resizeTo(960, 1080)
-                except Exception as e:
-                    log.error(f"Split screen error: {e}")
+                except Exception as e: log.error(f"Split Error: {e}")
             elif cmd_name == "WORK_MODE":
-                log.info("💼 Activation du Mode Travail")
-                os.system("start code") # VS Code
-                self._execute_command("[CMD: PLAY_MUSIC('son triste')]")
-                # Recherche d'un PDF dans Issoire (exemple)
-                os.system(f"start {os.path.join('C:', 'Users', self.user_name, 'Documents', 'cours.pdf')}")
+                CommandExecutor.safe_execute("OPEN_APP", ["vscode"])
+                self._execute_command("[CMD: PLAY_MUSIC('triste')]")
+                pdf_path = os.path.join(os.environ['USERPROFILE'], 'Documents', 'cours.pdf')
+                CommandExecutor.safe_execute("START_FILE", [pdf_path])
             elif cmd_name == "GET_WEATHER":
-                log.info(f"☀️ Récupération météo pour {args[0]}...")
                 webbrowser.open(f"https://www.google.com/search?q=meteo+{args[0]}")
             elif cmd_name == "CALC_TRIP":
-                log.info(f"🚗 Calcul trajet : {args[0]} -> {args[1]}")
                 webbrowser.open(f"https://www.google.com/maps/dir/{args[0]}/{args[1]}")
             elif cmd_name == "SET_VOICE_MORPH":
                 self.tts.use_morphing = (args[0].lower() == "true")
-                log.info(f"🎙️ Voice Morphing : {self.tts.use_morphing}")
             elif cmd_name == "INDEX_PDF":
                 self.memory.index_pdf(args[0])
             elif cmd_name == "SCREENSHOT_ANALYZE":
                 asyncio.create_task(self._screenshot_and_analyze())
-            elif cmd_name == "MIDI":
-                log.info(f"🎹 MIDI Placeholder: {args[0]}")
             elif cmd_name == "HA_CONTROL":
-                # [CMD: HA_CONTROL('entity_id', 'service')]
                 asyncio.create_task(self._ha_control(args[0], args[1]))
+
         except Exception as e:
-            log.error(f"Erreur exécution commande {cmd_tag}: {e}")
+            log.error(f"❌ Erreur critique Parser/Executor sur {cmd_tag} : {e}")
 
     async def _screenshot_and_analyze(self):
         """Prend une capture d'écran et l'analyse via Ollama (Moondream)."""
