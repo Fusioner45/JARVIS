@@ -28,7 +28,7 @@ class JarvisContext:
         self.stop_event.clear()
 
     def trigger_stop(self):
-        """Atomsically signals to stop all current output activities."""
+        """Atomically signals to stop all current output activities."""
         self.stop_event.set()
         self.is_speaking = False
 
@@ -39,7 +39,7 @@ class JarvisContext:
             except queue.Empty:
                 break
 
-        # We can't easily clear an asyncio.Queue, but we can consume it
+        # Consume asyncio queue
         while not self.audio_output_queue.empty():
             try:
                 self.audio_output_queue.get_nowait()

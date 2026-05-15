@@ -1,6 +1,7 @@
 import asyncio
 import json
 import aiohttp
+import time
 from typing import AsyncGenerator, List, Dict
 from jarvis.utils.config import OLLAMA_HOST, OLLAMA_MODEL
 from jarvis.utils.logger import llm_log as log, perf_tracker
@@ -24,7 +25,9 @@ class LlmClient:
         url = f"{self.base_url}/v1/chat/completions"
         payload = {"model": self.model, "messages": messages, "temperature": 0.7, "stream": True}
 
+        start_time = time.perf_counter()
         first_token = True
+
         try:
             async with self.session.post(url, json=payload, timeout=120) as resp:
                 resp.raise_for_status()
@@ -39,13 +42,14 @@ class LlmClient:
                             token = data["choices"][0]["delta"].get("content", "")
                             if token:
                                 if first_token:
-                                    log.info("🚀 LLM : Premier token reçu.")
+                                    elapsed = (time.perf_counter() - start_time) * 1000
+                                    log.info(f"🚀 LLM TTFT (Time to First Token) : {elapsed:.2f}ms")
                                     first_token = False
                                 yield token
                         except: continue
         except Exception as e:
             log.error(f"LLM Stream Error: {e}")
-            yield "Erreur de connexion LLM."
+            yield "Désolé, j'ai une erreur de connexion LLM."
 
 class IntentClassifier:
     @staticmethod
