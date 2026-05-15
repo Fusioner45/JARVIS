@@ -23,6 +23,9 @@ filelock==3.29.0
 flatbuffers==25.12.19
 frozenlist==1.8.0
 fsspec==2026.4.0
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
 h11==0.16.0
 hf-xet==1.5.0
 httpcore==1.0.9
@@ -43,6 +46,8 @@ packaging==26.2
 pillow==12.2.0
 propcache==0.5.2
 protobuf==7.34.1
+pvporcupine
+pvrecorder
 pyautogui
 pycaw
 pycparser==3.0
@@ -51,6 +56,8 @@ pydantic_core==2.46.4
 pydub==0.25.1
 pygetwindow
 pynvml
+pypdf
+python-dotenv
 requests
 rich==15.0.0
 setuptools==69.5.1

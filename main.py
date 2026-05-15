@@ -23,8 +23,9 @@ import re
 import sqlite3
 import threading
 import time
+import subprocess
 from collections import deque
-from typing import AsyncGenerator, List, Dict
+from typing import AsyncGenerator, List, Dict, Any
 
 import numpy as np
 from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QGraphicsDropShadowEffect
@@ -35,6 +36,9 @@ import os
 import pyautogui
 import sounddevice as sd
 import torch
+import pvporcupine
+from pvrecorder import PvRecorder
+from dotenv import load_dotenv
 import pynvml
 import pygetwindow as gw
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
@@ -43,6 +47,7 @@ from faster_whisper import WhisperModel
 import aiohttp
 import edge_tts
 from pydub import AudioSegment  # décodage MP3 → PCM
+import pypdf
 
 # ----------------------------------------------------------------------
 # Persistence: SQLite Memory Core
@@ -75,6 +80,27 @@ class JarvisMemory:
             conn.execute("INSERT INTO memory (fact_type, content) VALUES ('tâche', ?)", (f"{task} (Échéance: {due_time})" if due_time else task,))
             conn.commit()
             log.info(f"📝 Tâche enregistrée : {task}")
+
+    def index_pdf(self, pdf_path: str):
+        """Extrait le texte d'un PDF et le stocke comme 'cours'."""
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = pypdf.PdfReader(f)
+                text = ""
+                for page in reader.pages:
+                    text += page.extract_text() + "\n"
+
+                # On stocke par morceaux pour ne pas saturer une ligne
+                chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
+                with sqlite3.connect(self.db_path) as conn:
+                    file_name = os.path.basename(pdf_path)
+                    for i, chunk in enumerate(chunks):
+                        conn.execute("INSERT INTO memory (fact_type, content) VALUES (?, ?)",
+                                     (f"cours:{file_name}", chunk))
+                    conn.commit()
+            log.info(f"📚 PDF indexé : {pdf_path}")
+        except Exception as e:
+            log.error(f"Erreur indexation PDF {pdf_path}: {e}")
 
     def query_memory(self, search_term: str) -> List[str]:
         with sqlite3.connect(self.db_path) as conn:
@@ -118,7 +144,8 @@ ALLOWED_COMMANDS = [
     "OPEN_APP", "SEARCH_WEB", "PLAY_MUSIC",
     "SAVE_FACT", "DELETE_FACT", "SAVE_TASK",
     "SWITCH_LANG", "GET_GPU_TEMP", "SPLIT_SCREEN",
-    "WORK_MODE", "GET_WEATHER", "CALC_TRIP", "MIDI"
+    "WORK_MODE", "GET_WEATHER", "CALC_TRIP", "MIDI",
+    "SET_VOICE_MORPH", "INDEX_PDF", "SCREENSHOT_ANALYZE", "HA_CONTROL"
 ]
 
 APP_MAPPING = {
@@ -356,6 +383,7 @@ class LlmClient:
 class TextToSpeech:
     def __init__(self, voice: str = EDGE_TTS_VOICE):
         self.voice = voice
+        self.use_morphing = False
 
     async def speak(self, text: str, audio_queue: asyncio.Queue):
         """
@@ -389,6 +417,8 @@ class TextToSpeech:
 
         pcm_array = await loop.run_in_executor(None, _decode)
         if pcm_array is not None:
+            if self.use_morphing:
+                pcm_array = await loop.run_in_executor(None, VoiceMorpher.apply_robot_filter, pcm_array, SAMPLE_RATE)
             await audio_queue.put(pcm_array)
 
 
@@ -523,6 +553,35 @@ class JarvisSignals(QObject):
 
 
 # ----------------------------------------------------------------------
+# Helper: Voice Morphing (FFmpeg)
+# ----------------------------------------------------------------------
+class VoiceMorpher:
+    @staticmethod
+    def apply_robot_filter(input_pcm: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Applique un effet de voix robotique via FFmpeg."""
+        import tempfile
+        import soundfile as sf
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fin, \
+             tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fout:
+            sf.write(fin.name, input_pcm, sample_rate)
+            fin.close()
+            fout.close()
+
+            # Filtre FFmpeg : pitch shift down + vibrato (robotique)
+            cmd = [
+                'ffmpeg', '-y', '-i', fin.name,
+                '-af', 'asetrate=16000*0.8,atempo=1.25,vibrato=f=10:d=0.5',
+                fout.name
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
+
+            out_data, _ = sf.read(fout.name, dtype='int16')
+            os.unlink(fin.name)
+            os.unlink(fout.name)
+            return out_data
+
+# ----------------------------------------------------------------------
 # Helper: Windows Audio Ducking
 # ----------------------------------------------------------------------
 class AudioController:
@@ -540,6 +599,27 @@ class AudioController:
             # Baisser à 10% (0.1) ou remettre à 100% (1.0) - attention, on suppose 1.0 par défaut
             target = 0.1 if duck else 1.0
             self.volume.SetMasterVolumeLevelScalar(target, None)
+
+# ----------------------------------------------------------------------
+# Helper: Wake-Word Detection (Picovoice Porcupine)
+# ----------------------------------------------------------------------
+class WakeWordDetector:
+    def __init__(self, access_key: str, keywords: List[str] = ["jarvis"]):
+        self.porcupine = pvporcupine.create(access_key=access_key, keywords=keywords)
+        self.recorder = PvRecorder(device_index=-1, frame_length=self.porcupine.frame_length)
+
+    def listen(self):
+        self.recorder.start()
+        log.info("👂 En attente du mot-clé (Porcupine)...")
+        try:
+            while True:
+                pcm = self.recorder.read()
+                keyword_index = self.porcupine.process(pcm)
+                if keyword_index >= 0:
+                    log.info("✨ Mot-clé détecté !")
+                    return True
+        finally:
+            self.recorder.stop()
 
 # ----------------------------------------------------------------------
 # Helper: GPU Monitoring (NVML)
@@ -610,6 +690,10 @@ ACTIONS DISPONIBLES :
 - [CMD: GET_GPU_TEMP()] : Température GPU.
 - [CMD: SPLIT_SCREEN('app1', 'app2')] : Organisation fenêtres.
 - [CMD: WORK_MODE()] : Mode travail.
+- [CMD: SET_VOICE_MORPH(True/False)] : Activer le mode voix robotique.
+- [CMD: INDEX_PDF('chemin')] : Analyser un PDF de cours.
+- [CMD: SCREENSHOT_ANALYZE()] : Prendre une capture et l'analyser avec Moondream.
+- [CMD: HA_CONTROL('entity_id', 'service')] : Contrôler Home Assistant (ex: light.chambre, turn_on).
 
 Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
 """}
@@ -682,9 +766,17 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
 
     async def run(self):
         """
-        Boucle principale avec streaming LLM et TTS phrase par phrase.
+        Boucle principale avec Wake-word, streaming LLM et TTS phrase par phrase.
         """
-        log.info("🚀 Jarvis V2 démarré – dites quelque chose !")
+        load_dotenv()
+        access_key = os.getenv("PICOVOICE_ACCESS_KEY")
+
+        # Initialisation du détecteur de mot-clé si la clé est présente
+        self.ww_detector = None
+        if access_key:
+            self.ww_detector = WakeWordDetector(access_key)
+
+        log.info("🚀 Jarvis V4 Ultimate démarré !")
 
         # Salutation initiale
         greeting = f"Bonjour {self.user_name}, systèmes en ligne. Comment puis-je vous aider ?"
@@ -735,19 +827,35 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
         await self.tts.speak(greeting, self.audio_queue)
 
         try:
-            async for user_text in self._audio_listener():
-                # Barge-in : annuler la réponse et vider l'audio
-                if hasattr(self, "_response_task") and not self._response_task.done():
-                    log.info("🚫 Interruption (Barge-in) – on coupe la parole.")
-                    self._response_task.cancel()
+            while True:
+                # Mode Wake-Word
+                if self.ww_detector:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, self.ww_detector.listen)
 
-                # Vider le buffer audio pour arrêter de parler immédiatement
-                self._clear_audio_buffer()
-                while not self.audio_queue.empty():
-                    try: self.audio_queue.get_nowait(); self.audio_queue.task_done()
-                    except asyncio.QueueEmpty: break
+                async for user_text in self._audio_listener():
+                    # Une fois qu'on a un texte, on sort de l'écoute continue pour traiter (et revenir au wake-word après)
 
-                self._response_task = asyncio.create_task(self._process_and_respond(user_text))
+                    # Barge-in : annuler la réponse et vider l'audio
+                    if hasattr(self, "_response_task") and not self._response_task.done():
+                        log.info("🚫 Interruption (Barge-in) – on coupe la parole.")
+                        self._response_task.cancel()
+
+                    # Vider le buffer audio pour arrêter de parler immédiatement
+                    self._clear_audio_buffer()
+                    while not self.audio_queue.empty():
+                        try:
+                            self.audio_queue.get_nowait()
+                            self.audio_queue.task_done()
+                        except asyncio.QueueEmpty:
+                            break
+
+                    self._response_task = asyncio.create_task(self._process_and_respond(user_text))
+                    await self._response_task
+
+                    # Si on est en mode wake-word, on ne boucle qu'une fois par détection
+                    if self.ww_detector:
+                        break
         finally:
             output_stream.stop()
             output_stream.close()
@@ -886,10 +994,76 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
             elif cmd_name == "CALC_TRIP":
                 log.info(f"🚗 Calcul trajet : {args[0]} -> {args[1]}")
                 webbrowser.open(f"https://www.google.com/maps/dir/{args[0]}/{args[1]}")
+            elif cmd_name == "SET_VOICE_MORPH":
+                self.tts.use_morphing = (args[0].lower() == "true")
+                log.info(f"🎙️ Voice Morphing : {self.tts.use_morphing}")
+            elif cmd_name == "INDEX_PDF":
+                self.memory.index_pdf(args[0])
+            elif cmd_name == "SCREENSHOT_ANALYZE":
+                asyncio.create_task(self._screenshot_and_analyze())
             elif cmd_name == "MIDI":
                 log.info(f"🎹 MIDI Placeholder: {args[0]}")
+            elif cmd_name == "HA_CONTROL":
+                # [CMD: HA_CONTROL('entity_id', 'service')]
+                asyncio.create_task(self._ha_control(args[0], args[1]))
         except Exception as e:
             log.error(f"Erreur exécution commande {cmd_tag}: {e}")
+
+    async def _screenshot_and_analyze(self):
+        """Prend une capture d'écran et l'analyse via Ollama (Moondream)."""
+        import base64
+        try:
+            screenshot = pyautogui.screenshot()
+            img_byte_arr = io.BytesIO()
+            screenshot.save(img_byte_arr, format='PNG')
+            img_base64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+
+            log.info("📸 Analyse de l'écran en cours...")
+            url = f"{OLLAMA_HOST}/api/generate"
+            payload = {
+                "model": "moondream",
+                "prompt": "Décris brièvement ce que tu vois sur cet écran.",
+                "images": [img_base64],
+                "stream": False
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        description = data.get("response", "Je n'ai pas pu analyser l'image.")
+                        log.info(f"👁️ Vision : {description}")
+                        await self.tts.speak(f"Sur votre écran, je vois : {description}", self.audio_queue)
+                    else:
+                        await self.tts.speak("Désolé Fusion, ma vision est temporairement indisponible.", self.audio_queue)
+        except Exception as e:
+            log.error(f"Erreur vision : {e}")
+
+    async def _ha_control(self, entity_id: str, service: str):
+        """Contrôle Home Assistant."""
+        ha_url = os.getenv("HA_URL")
+        ha_token = os.getenv("HA_TOKEN")
+        if not ha_url or not ha_token:
+            log.warning("HA_URL ou HA_TOKEN manquant dans le .env")
+            return
+
+        domain = entity_id.split('.')[0]
+        url = f"{ha_url}/api/services/{domain}/{service}"
+        headers = {
+            "Authorization": f"Bearer {ha_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"entity_id": entity_id}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    if resp.status == 200:
+                        log.info(f"🏠 HA : {service} sur {entity_id} réussi.")
+                    else:
+                        log.error(f"🏠 HA Error : {resp.status}")
+        except Exception as e:
+            log.error(f"HA Connection Error : {e}")
 
     async def _process_and_respond(self, user_text: str):
         """
