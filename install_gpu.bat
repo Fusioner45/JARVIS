@@ -2,6 +2,14 @@
 setlocal
 title JARVIS GPU INSTALLER (CUDA 12.1)
 
+echo [JARVIS] Verification de l'environnement...
+python --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERREUR] Python n'est pas installe ou pas dans le PATH.
+    pause
+    exit /b
+)
+
 echo [JARVIS] Verification du materiel...
 nvidia-smi >nul 2>&1
 if %errorlevel% neq 0 (
@@ -13,18 +21,24 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [JARVIS] Mise a jour de pip...
-python -m pip install --upgrade pip
+python -m pip install --upgrade pip --quiet
 
-echo [JARVIS] ÉTAPE 1 : Installation des dependances Core...
-pip install -r requirements.txt
+echo [JARVIS] Etape 1 : Installation des dependances Core (CPU initial pass)...
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 echo.
-echo [JARVIS] ÉTAPE 2 : Overlay des accelerations GPU (CUDA 12.1)...
-:: Installation forcee pour remplacer la version CPU installee a l'etape 1
+echo [JARVIS] Etape 2 : Installation de PyTorch GPU (CUDA 12.1)...
 pip install torch==2.2.1+cu121 torchvision==0.17.1+cu121 torchaudio==2.2.1+cu121 --index-url https://download.pytorch.org/whl/cu121
-pip install onnxruntime-gpu==1.17.0
 
 echo.
-echo [DONE] JARVIS est pret avec acceleration RTX.
+echo [JARVIS] Etape 3 : Installation des dependances GPU (requirements-gpu.txt)...
+pip install -r requirements-gpu.txt --index-url https://download.pytorch.org/whl/cu121
+
+echo.
+echo [JARVIS] Validation finale...
+pip check
+
+echo.
+echo [DONE] JARVIS est pret avec acceleration RTX (CUDA 12.1).
 pause
 endlocal

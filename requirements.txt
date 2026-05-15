@@ -16,9 +16,8 @@ pyautogui==0.9.54
 pygetwindow==0.0.9
 pycaw==2.0.1
 comtypes==1.2.0
-pynvml==11.5.0
 
-# Standard CPU IA Stack
-torch==2.2.1
-torchvision==0.17.1
-torchaudio==2.2.1
+# Standard CPU IA Stack (Strictly CPU)
+torch==2.2.1+cpu
+torchvision==0.17.1+cpu
+torchaudio==2.2.1+cpu
