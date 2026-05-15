@@ -112,6 +112,24 @@ PLAYLISTS = {
 }
 
 # ----------------------------------------------------------------------
+# Command Mappings & Allowed Tags
+# ----------------------------------------------------------------------
+ALLOWED_COMMANDS = [
+    "OPEN_APP", "SEARCH_WEB", "PLAY_MUSIC",
+    "SAVE_FACT", "DELETE_FACT", "SAVE_TASK",
+    "SWITCH_LANG", "GET_GPU_TEMP", "SPLIT_SCREEN",
+    "WORK_MODE", "GET_WEATHER", "CALC_TRIP", "MIDI"
+]
+
+APP_MAPPING = {
+    "youtube": "https://youtube.com",
+    "spotify": "spotify",
+    "vscode": "code",
+    "discord": "discord",
+    "calculatrice": "calc"
+}
+
+# ----------------------------------------------------------------------
 # Configuration (à adapter si besoin)
 # ----------------------------------------------------------------------
 SAMPLE_RATE = 16000               # Hz – required by webrtcvad & faster‑whisper
@@ -436,54 +454,58 @@ class ArcReactor(QWidget):
             self.timer.stop()
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        center = QPointF(self.width() / 2, 250)
+            center = QPointF(self.width() / 2, 250)
 
-        # 1. Global Neon Glow
-        glow = QRadialGradient(center, 300)
-        glow.setColorAt(0, QColor(0, 242, 255, 30))
-        glow.setColorAt(1, Qt.GlobalColor.transparent)
-        painter.setBrush(QBrush(glow))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(center, 300, 300)
+            # 1. Global Neon Glow
+            glow = QRadialGradient(center, 300)
+            glow.setColorAt(0, QColor(0, 242, 255, 30))
+            glow.setColorAt(1, Qt.GlobalColor.transparent)
+            painter.setBrush(QBrush(glow))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(center, 300, 300)
 
-        # 2. Outer Ring (Rotating)
-        painter.save()
-        painter.translate(center)
-        painter.rotate(self.angle_outer)
+            # 2. Outer Ring (Rotating)
+            painter.save()
+            painter.translate(center)
+            painter.rotate(self.angle_outer)
 
-        pen_outer = QPen(QColor(0, 242, 255, 100), 2)
-        pen_outer.setDashPattern([10, 10])
-        painter.setPen(pen_outer)
-        painter.drawEllipse(QRectF(-120, -120, 240, 240))
+            pen_outer = QPen(QColor(0, 242, 255, 100), 2)
+            pen_outer.setDashPattern([10, 10])
+            painter.setPen(pen_outer)
+            painter.drawEllipse(QRectF(-120, -120, 240, 240))
 
-        # Outer thick segments
-        painter.setPen(QPen(QColor(0, 242, 255, 180), 5))
-        for i in range(0, 360, 60):
-            painter.drawArc(QRectF(-125, -125, 250, 250), i * 16, 30 * 16)
-        painter.restore()
+            # Outer thick segments
+            painter.setPen(QPen(QColor(0, 242, 255, 180), 5))
+            for i in range(0, 360, 60):
+                painter.drawArc(QRectF(-125, -125, 250, 250), i * 16, 30 * 16)
+            painter.restore()
 
-        # 3. Inner Ring (Pulsing)
-        inner_scale = 1.0 + 0.1 * np.sin(self.pulse_inner)
-        inner_radius = 60 * inner_scale
+            # 3. Inner Ring (Pulsing)
+            inner_scale = 1.0 + 0.1 * np.sin(self.pulse_inner)
+            inner_radius = 60 * inner_scale
 
-        color_inner = QColor(0, 242, 255, 220) if not self.is_thinking else QColor(255, 50, 50, 220)
-        painter.setPen(QPen(color_inner, 3))
-        painter.drawEllipse(center, inner_radius, inner_radius)
+            color_inner = QColor(0, 242, 255, 220) if not self.is_thinking else QColor(255, 50, 50, 220)
+            painter.setPen(QPen(color_inner, 3))
+            painter.drawEllipse(center, inner_radius, inner_radius)
 
-        # Inner glow
-        inner_glow = QRadialGradient(center, inner_radius)
-        inner_glow.setColorAt(0, color_inner)
-        inner_glow.setColorAt(1, Qt.GlobalColor.transparent)
-        painter.setBrush(QBrush(inner_glow))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(center, inner_radius, inner_radius)
+            # Inner glow
+            inner_glow = QRadialGradient(center, inner_radius)
+            inner_glow.setColorAt(0, color_inner)
+            inner_glow.setColorAt(1, Qt.GlobalColor.transparent)
+            painter.setBrush(QBrush(inner_glow))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(center, inner_radius, inner_radius)
 
-        # 4. Core Triangle/Circle
-        painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
-        painter.drawEllipse(center, 15, 15)
+            # 4. Core Triangle/Circle
+            painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
+            painter.drawEllipse(center, 15, 15)
+        except Exception:
+            # Sécurité massive pour éviter tout crash de l'UI
+            pass
 
     def set_text(self, text):
         if text != self.target_text:
@@ -762,15 +784,28 @@ Exemple : "Tout de suite, {self.user_name}, je lance votre playlist son triste. 
             if not match: return
 
             cmd_name = match.group(1)
+
+            # FILTRAGE : Si la commande n'est pas autorisée, on l'ignore
+            if cmd_name not in ALLOWED_COMMANDS:
+                log.warning(f"⚠️ Commande ignorée (non définie) : {cmd_name}")
+                return
+
             # Nettoyage rudimentaire des quotes
             args = [a.strip().strip("'").strip('"') for a in match.group(2).split(",")]
 
             log.info(f"🚀 Exécution commande : {cmd_name} avec args {args}")
 
             if cmd_name == "OPEN_APP":
-                # Sur Windows, on peut souvent juste lancer le nom de l'exe
-                os.system(f"start {args[0]}")
-                if "spotify" in args[0].lower():
+                app_query = args[0].lower()
+                target = APP_MAPPING.get(app_query, args[0])
+
+                # Si c'est une URL
+                if target.startswith("http"):
+                    webbrowser.open(target)
+                else:
+                    os.system(f"start {target}")
+
+                if "spotify" in app_query:
                     # Petite automatisation pour lancer la lecture
                     def _spotify_play():
                         time.sleep(3)
