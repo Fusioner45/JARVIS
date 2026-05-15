@@ -23,14 +23,28 @@ class LlmClient:
     async def generate_stream(self, messages: List[Dict]) -> AsyncGenerator[str, None]:
         await self._ensure_session()
         url = f"{self.base_url}/v1/chat/completions"
-        payload = {"model": self.model, "messages": messages, "temperature": 0.7, "stream": True}
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.4, # Réduit pour plus de déterminisme
+            "stream": True,
+            "options": {
+                "num_ctx": 4096,
+                "num_predict": 512
+            }
+        }
 
         start_time = time.perf_counter()
         first_token = True
 
         try:
-            async with self.session.post(url, json=payload, timeout=120) as resp:
-                resp.raise_for_status()
+            async with self.session.post(url, json=payload, timeout=60) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    log.error(f"Ollama Error ({resp.status}): {error_text}")
+                    yield f"Erreur LLM ({resp.status})."
+                    return
+
                 async for line in resp.content:
                     if not line: continue
                     line_str = line.decode("utf-8").strip()
@@ -43,19 +57,13 @@ class LlmClient:
                             if token:
                                 if first_token:
                                     elapsed = (time.perf_counter() - start_time) * 1000
-                                    log.info(f"🚀 LLM TTFT (Time to First Token) : {elapsed:.2f}ms")
+                                    log.info(f"🚀 LLM TTFT : {elapsed:.2f}ms")
                                     first_token = False
                                 yield token
                         except: continue
+        except asyncio.TimeoutError:
+            log.error("LLM Timeout après 60s")
+            yield "Le serveur LLM ne répond pas (Timeout)."
         except Exception as e:
             log.error(f"LLM Stream Error: {e}")
-            yield "Désolé, j'ai une erreur de connexion LLM."
-
-class IntentClassifier:
-    @staticmethod
-    def classify(text: str) -> JarvisState:
-        text = text.lower()
-        actions = ["ouvre", "lance", "cherche", "musique", "température", "mémorise", "rappelle", "indexe"]
-        if any(kw in text for kw in actions):
-            return JarvisState.EXECUTING
-        return JarvisState.THINKING
+            yield "Désolé, j'ai une erreur de connexion au cerveau local."

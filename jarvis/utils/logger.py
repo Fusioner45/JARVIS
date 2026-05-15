@@ -8,7 +8,7 @@ def setup_logger(name: str, log_file: str, level=logging.INFO):
     formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s', datefmt="%H:%M:%S")
     os.makedirs('logs', exist_ok=True)
 
-    handler = logging.FileHandler(f'logs/{log_file}')
+    handler = logging.FileHandler(f'logs/{log_file}', encoding='utf-8')
     handler.setFormatter(formatter)
 
     console_handler = logging.StreamHandler(sys.stdout)
@@ -32,6 +32,8 @@ system_log = setup_logger("Jarvis.System", "system.log")
 def perf_tracker(domain_logger, label: str):
     """Context manager to measure and log latency of operations."""
     start = time.perf_counter()
-    yield
-    elapsed = (time.perf_counter() - start) * 1000
-    domain_logger.info(f"⏱️ PERF | {label}: {elapsed:.2f}ms")
+    try:
+        yield
+    finally:
+        elapsed = (time.perf_counter() - start) * 1000
+        domain_logger.info(f"⏱️ PERF | {label}: {elapsed:.2f}ms")

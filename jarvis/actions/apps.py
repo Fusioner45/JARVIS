@@ -1,52 +1,62 @@
 import os
-import subprocess
 import winreg
-from jarvis.utils.config import APP_WHITELIST
+import shutil
+from typing import Dict, Optional
 from jarvis.utils.logger import action_log as log
 
 class AppResolver:
-    _cache = {}
+    """Resolves Windows applications using Registry, PATH, and Whitelist (Phase 5)."""
+
+    _cache: Dict[str, str] = {}
 
     @classmethod
-    def find_app(cls, app_name: str) -> str:
-        """Finds application path via Whitelist, PATH, Registry, or Start Menu."""
-        app_name = app_name.lower()
-        if app_name in cls._cache: return cls._cache[app_name]
+    def find_app(cls, name: str) -> str:
+        name = name.lower()
+        if name in cls._cache:
+            return cls._cache[name]
 
         # 1. Whitelist
-        if app_name in APP_WHITELIST:
-            res = APP_WHITELIST[app_name]
-            cls._cache[app_name] = res
-            return res
+        from jarvis.utils.config import APP_WHITELIST
+        if name in APP_WHITELIST:
+            path = APP_WHITELIST[name]
+            cls._cache[name] = path
+            return path
 
         # 2. System PATH
-        try:
-            path = subprocess.check_output(['where', app_name], stderr=subprocess.DEVNULL).decode().splitlines()[0]
-            cls._cache[app_name] = path
+        path = shutil.which(name)
+        if path:
+            cls._cache[name] = path
             return path
-        except: pass
 
         # 3. Windows Registry (App Paths)
-        try:
-            reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{app_name}.exe"
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
-                res, _ = winreg.QueryValueEx(key, "")
-                cls._cache[app_name] = res
-                return res
-        except: pass
+        reg_path = cls._search_registry(name)
+        if reg_path:
+            cls._cache[name] = reg_path
+            return reg_path
 
-        # 4. Start Menu Scan
-        menu_paths = [
-            os.path.join(os.environ["ProgramData"], "Microsoft", "Windows", "Start Menu", "Programs"),
-            os.path.join(os.environ["AppData"], "Microsoft", "Windows", "Start Menu", "Programs")
+        # 4. Start Menu / common locations (Fallback to just name if not found)
+        log.warning(f"Application '{name}' non trouvée via Registry/PATH.")
+        return name
+
+    @staticmethod
+    def _search_registry(name: str) -> Optional[str]:
+        """Looks up executable path in Windows Registry."""
+        # Simple suffix addition for common apps
+        search_names = [name, f"{name}.exe"]
+        keys = [
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths"
         ]
-        for base in menu_paths:
-            if not os.path.exists(base): continue
-            for root, _, files in os.walk(base):
-                for f in files:
-                    if app_name in f.lower() and f.endswith(".lnk"):
-                        res = os.path.join(root, f)
-                        cls._cache[app_name] = res
-                        return res
 
-        return app_name # Fallback to name
+        for s_name in search_names:
+            for root_key in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
+                for key_base in keys:
+                    try:
+                        full_key = f"{key_base}\\{s_name}"
+                        with winreg.OpenKey(root_key, full_key) as k:
+                            path, _ = winreg.QueryValueEx(k, "")
+                            if os.path.exists(path):
+                                return path
+                    except (FileNotFoundError, OSError):
+                        continue
+        return None
