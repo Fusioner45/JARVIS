@@ -1,0 +1,4 @@
+# JARVIS - GPU AI Dependencies (Torch)
+torch
+torchvision
+torchaudio

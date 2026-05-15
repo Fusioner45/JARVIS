@@ -1,30 +1,29 @@
-# JARVIS V5 - Local Production Engine
-# Optimized for Windows 11, RTX 3070 Ti, CUDA 12.1
+# JARVIS - Core Dependencies (Standard Pip)
 
-# --- Core Architecture ---
-asyncio
-aiohttp==3.9.1
-python-dotenv==1.0.1
-numpy==1.26.4
+# --- Network & Async ---
+aiohttp
+python-dotenv
 
-# --- AI & Audio Processing (CUDA 12.1 Optimized) ---
-# Note: Manually install torch/torchaudio with cu121 if needed
-torch==2.2.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121
-torchaudio==2.2.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121
-faster-whisper==0.10.0
-pvporcupine==3.0.0
-pvrecorder==1.2.1
-pypdf==4.0.1
-onnxruntime-gpu==1.17.0
+# --- Data & AI Runtimes ---
+numpy
+onnxruntime-gpu
 
-# --- OS Automation & Tools ---
-PyQt6==6.6.1
-pyautogui==0.9.54
-pycaw==2.0.1
-pynvml==11.5.0
-pygetwindow==0.0.9
-comtypes==1.2.0
-sounddevice==0.4.6
-pydub==0.25.1
-edge-tts==6.1.9
-soundfile==0.12.1
+# --- Audio & Voice ---
+faster-whisper
+pvporcupine
+pvrecorder
+sounddevice
+soundfile
+pydub
+edge-tts
+
+# --- Intelligence & PDF ---
+pypdf
+
+# --- UI & Windows Automation ---
+PyQt6
+pyautogui
+pygetwindow
+pycaw
+comtypes
+pynvml
