@@ -60,9 +60,9 @@ class JarvisMemory:
 
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
-            # Activation FTS5 pour recherche sémantique performante
-            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(fact_type, content, timestamp, expires_at)")
-            # Table classique pour méta-données si besoin, mais on va tout mettre dans FTS5 pour cet usage
+            # Activation FTS5 pour recherche plein-texte performante
+            # On utilise tokenize='porter' pour le stemming (plus intelligent)
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(fact_type, content, timestamp, expires_at, tokenize='porter')")
             conn.commit()
 
     def cleanup_obsolete(self):
@@ -120,12 +120,18 @@ class JarvisMemory:
             log.info(f"🗑️ Mémoire supprimée : {search_term}")
 
     def get_all_context(self) -> str:
-        """Récupère un résumé de tous les faits pour le prompt système."""
+        """Récupère un résumé de tous les faits pertinents pour le prompt système."""
         with sqlite3.connect(self.db_path) as conn:
-            self.cleanup_obsolete() # On nettoie avant de charger
-            cursor = conn.execute("SELECT fact_type, content FROM memory_fts ORDER BY timestamp DESC LIMIT 20")
+            self.cleanup_obsolete()
+            # Priorité aux informations récentes et types importants
+            cursor = conn.execute("SELECT fact_type, content FROM memory_fts ORDER BY timestamp DESC LIMIT 15")
             facts = [f"- {ft}: {c}" for ft, c in cursor.fetchall()]
-            return "\n".join(facts) if facts else "Aucun fait mémorisé pour le moment."
+            return "\n".join(facts) if facts else "Mémoire vide."
+
+    def summarize_context(self, history: List[Dict]):
+        """Placeholder pour une future fonction de résumé du contexte conversationnel."""
+        # En production, on pourrait demander au LLM de résumer les 50 derniers messages
+        pass
 
     def get_user_name(self) -> str:
         """Cherche le nom de l'utilisateur dans la mémoire."""
@@ -145,23 +151,16 @@ PLAYLISTS = {
 # ----------------------------------------------------------------------
 # Command Mappings & Allowed Tags (Security & Mapping)
 # ----------------------------------------------------------------------
-# Whitelist des commandes autorisées
-ALLOWED_COMMANDS = [
-    "OPEN_APP", "SEARCH_WEB", "PLAY_MUSIC",
-    "SAVE_FACT", "DELETE_FACT", "SAVE_TASK",
-    "SWITCH_LANG", "GET_GPU_TEMP", "SPLIT_SCREEN",
-    "WORK_MODE", "GET_WEATHER", "CALC_TRIP", "MIDI",
-    "SET_VOICE_MORPH", "INDEX_PDF", "SCREENSHOT_ANALYZE", "HA_CONTROL"
-]
-
-# Mapping sécurisé des applications vers des chemins absolus ou alias vérifiés
+# ----------------------------------------------------------------------
+# Command Configuration & Security Whitelist
+# ----------------------------------------------------------------------
+# Mapping sécurisé des applications vers des chemins absolus vérifiés
 APP_WHITELIST = {
     "vscode": r"C:\Users\Fusion\AppData\Local\Programs\Microsoft VS Code\Code.exe",
     "spotify": r"C:\Users\Fusion\AppData\Roaming\Spotify\Spotify.exe",
     "discord": r"C:\Users\Fusion\AppData\Local\Discord\Update.exe",
     "chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     "calculatrice": "calc.exe",
-    "youtube": "https://youtube.com",
 }
 
 # ----------------------------------------------------------------------
@@ -648,47 +647,86 @@ class WakeWordDetector:
             self.recorder.stop()
 
 # ----------------------------------------------------------------------
-# Helper: Command Executor (Zero-Trust)
+# Helper: Command Executor (Zero-Trust) & Tool Manager (Anti-Loop)
 # ----------------------------------------------------------------------
+class ToolManager:
+    """Gère l'historique des actions et les cooldowns pour éviter les boucles."""
+    def __init__(self):
+        self.last_actions: Dict[str, float] = {}
+        self.cooldown = 5.0 # secondes
+
+    def can_execute(self, cmd_id: str) -> bool:
+        now = time.time()
+        if cmd_id in self.last_actions:
+            if now - self.last_actions[cmd_id] < self.cooldown:
+                return False
+        self.last_actions[cmd_id] = now
+        return True
+
 class CommandExecutor:
-    """Exécute des commandes système avec validation stricte et sans shell."""
+    """Exécute des commandes système avec validation stricte (Zero-Trust)."""
 
     @staticmethod
-    def safe_execute(cmd_name: str, args: List[str]):
-        # Caractères interdits pour prévenir l'injection (même si shell=False, par précaution)
+    def execute(cmd_name: str, args: List[str]) -> str:
         forbidden = [';', '&', '|', '$', '>', '<', '`']
         for arg in args:
-            if any(char in arg for char in forbidden):
-                log.error(f"🚨 Tentative d'injection détectée dans l'argument : {arg}")
-                return
+            if any(c in str(arg) for c in forbidden):
+                return "FAILED: Injection character detected"
 
-        if cmd_name == "OPEN_APP":
-            app_id = args[0].lower()
-            if app_id in APP_WHITELIST:
-                target = APP_WHITELIST[app_id]
-                if target.startswith("http"):
-                    log.info(f"🌐 Ouverture Web : {target}")
-                    webbrowser.open(target)
-                else:
-                    log.info(f"🚀 Lancement App : {target}")
-                    # Utilisation de subprocess.Popen sans shell pour la sécurité
+        try:
+            if cmd_name == "OPEN_APP":
+                app_id = args[0].lower()
+                if app_id == "youtube": # Cas spécial mapping URL
+                    webbrowser.open("https://youtube.com")
+                    return "SUCCESS: YouTube opened in browser"
+
+                if app_id in APP_WHITELIST:
+                    target = APP_WHITELIST[app_id]
                     subprocess.Popen([target], shell=False)
-            else:
-                log.warning(f"⚠️ Application non autorisée : {app_id}")
+                    return f"SUCCESS: {app_id} launched"
+                return f"FAILED: {app_id} is not in whitelist"
 
-        elif cmd_name == "SEARCH_WEB":
-            query = args[0]
-            log.info(f"🔍 Recherche Web : {query}")
-            webbrowser.open(f"https://www.google.com/search?q={query}")
+            elif cmd_name == "SEARCH_WEB":
+                webbrowser.open(f"https://www.google.com/search?q={args[0]}")
+                return "SUCCESS: Web search triggered"
 
-        elif cmd_name == "START_FILE":
-            # Pour l'ouverture de dossiers ou fichiers locaux validés
-            path = args[0]
-            if os.path.exists(path) and path.startswith(r"C:"):
-                log.info(f"📂 Ouverture Fichier/Dossier : {path}")
-                os.startfile(path)
-            else:
-                log.error(f"🚨 Accès refusé ou chemin inexistant : {path}")
+            elif cmd_name == "START_FILE":
+                path = args[0]
+                if os.path.exists(path) and (path.startswith(r"C:") or path.startswith(os.environ.get('USERPROFILE', ''))):
+                    os.startfile(path)
+                    return f"SUCCESS: File {path} opened"
+                return "FAILED: Path access denied or not found"
+
+            return "FAILED: Unknown internal command"
+        except Exception as e:
+            return f"FAILED: {str(e)}"
+
+# ----------------------------------------------------------------------
+# Helper: Command Parser (Deterministic)
+# ----------------------------------------------------------------------
+class CommandParser:
+    """Isole et nettoie les tags [CMD: ...] dans le flux du LLM."""
+
+    @staticmethod
+    def extract_all(text: str) -> List[str]:
+        # Capture tout ce qui ressemble à [CMD: ...] même avec des retours à la ligne
+        pattern = r"\[\s*CMD\s*:\s*(.*?)\s*\]"
+        matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+        return [f"[CMD: {m.strip()}]" for m in matches]
+
+    @staticmethod
+    def parse_call(cmd_tag: str) -> tuple[str, List[str]]:
+        """Extrait le nom et les arguments d'un tag nettoyé."""
+        inner = cmd_tag.replace("[CMD:", "").replace("]", "").strip()
+        if "(" not in inner:
+            return inner, []
+
+        name = inner.split("(")[0].strip()
+        # Extraction intelligente des arguments séparés par des virgules
+        raw_args = inner[len(name):].strip("() ")
+        # Regex pour splitter par virgule SAUF si dans des quotes (simple mais efficace ici)
+        args = [a.strip().strip("'\"") for a in re.split(r",(?=(?:[^']*'[^']*')*[^']*$)", raw_args)]
+        return name, [a for a in args if a]
 
 # ----------------------------------------------------------------------
 # Helper: GPU Monitoring (NVML)
@@ -719,6 +757,7 @@ class Jarvis:
         self.memory = JarvisMemory()
         self.audio_ctrl = AudioController()
         self.gpu_mon = GpuMonitor()
+        self.tools = ToolManager()
         self.vad = VoiceActivityDetector()
         self.stt = SpeechToText()
         self.llm = LlmClient()
@@ -739,35 +778,38 @@ class Jarvis:
         self.current_language = "fr"
 
         self.history = [
-            {"role": "system", "content": f"""Tu es JARVIS, une IA 'Action-First'. Ton but est d'exécuter des commandes, pas de discuter inutilement.
-Tu réponds en Français. Tes réponses sont ultra-concises (maximum 2 phrases).
+            {"role": "system", "content": f"""Tu es JARVIS, un assistant de type 'Reasoning & Action'.
+Ton objectif est l'efficacité absolue. Tu réponds en Français, de manière ultra-concise.
 
-CONSIGNES CRITIQUES (Priorité Absolue) :
-1. Chaque fois qu'une action est possible, inclus SYSTÉMATIQUEMENT la balise [CMD: ...].
-2. Ne fais JAMAIS de disclaimer ("En tant qu'IA...", "Je n'ai pas accès..."). Si tu ne sais pas, utilise [CMD: SEARCH_WEB(...)].
-3. Si l'utilisateur mentionne une app ou un outil (Calculatrice, Spotify, etc.), génère la commande immédiatement.
-4. Si l'utilisateur dit "Triste", génère [CMD: PLAY_MUSIC('triste')].
-5. Ton utilisateur est {self.user_name}.
+MÉTHODE DE RÉFLEXION :
+1. ANALYSE : Identifie l'intention (Discussion ou Action ?).
+2. PLAN : Si une action est utile, choisis l'outil dans la Whitelist.
+3. ACTION : Génère le tag [CMD: ...] immédiatement.
+4. FEEDBACK : Utilise les 'Command Result' injectés dans l'historique pour confirmer le succès.
+
+CONSIGNES CRITIQUES :
+- Ne sois jamais bavard. Pas de politesse inutile, pas de disclaimer d'IA.
+- Si l'utilisateur dit "Triste", lance la musique triste : [CMD: PLAY_MUSIC('triste')].
+- Si l'utilisateur demande si tu peux parler, réponds simplement par l'affirmative, ne déclenche pas d'outil.
+- Ton utilisateur est {self.user_name}.
 
 CONTEXTE MÉMOIRE :
 {context}
 
-ACTIONS DISPONIBLES :
-- [CMD: OPEN_APP('nom')] : Lancer une application (vscode, spotify, discord).
-- [CMD: SEARCH_WEB('requête')] : Recherche internet.
-- [CMD: PLAY_MUSIC('recherche')] : Musique (priorité : playlists 'liké' ou 'triste', sinon local, sinon youtube).
-- [CMD: SAVE_FACT('type', 'contenu')] : Mémoriser.
-- [CMD: DELETE_FACT('recherche')] : Oublier.
-- [CMD: SAVE_TASK('tâche', 'échéance')] : Rappel.
-- [CMD: GET_GPU_TEMP()] : Température GPU.
-- [CMD: SPLIT_SCREEN('app1', 'app2')] : Organisation fenêtres.
-- [CMD: WORK_MODE()] : Mode travail.
-- [CMD: SET_VOICE_MORPH(True/False)] : Activer le mode voix robotique.
-- [CMD: INDEX_PDF('chemin')] : Analyser un PDF de cours.
-- [CMD: SCREENSHOT_ANALYZE()] : Prendre une capture et l'analyser avec Moondream.
-- [CMD: HA_CONTROL('entity_id', 'service')] : Contrôler Home Assistant (ex: light.chambre, turn_on).
+WHITELIST ACTIONS :
+- [CMD: OPEN_APP('vscode'|'spotify'|'discord'|'youtube')]
+- [CMD: SEARCH_WEB('requête')]
+- [CMD: PLAY_MUSIC('mot-clé')]
+- [CMD: SAVE_FACT('type', 'contenu')]
+- [CMD: DELETE_FACT('terme')]
+- [CMD: SAVE_TASK('tâche', 'échéance')]
+- [CMD: GET_GPU_TEMP()]
+- [CMD: SPLIT_SCREEN('app1', 'app2')]
+- [CMD: WORK_MODE()]
+- [CMD: SCREENSHOT_ANALYZE()]
+- [CMD: HA_CONTROL('entité', 'service')]
 
-Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
+Exemple : "C'est fait, {self.user_name}. [CMD: OPEN_APP('spotify')]"
 """}
         ]
         self.history_limit = 10
@@ -860,11 +902,11 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
         log.info("🚀 Jarvis V4 Ultimate démarré !")
 
         # Salutation initiale
-        greeting = f"Bonjour {self.user_name}, systèmes en ligne. Comment puis-je vous aider ?"
+        greeting = f"Systèmes en ligne. Bonjour {self.user_name}."
         if self.signals:
             self.signals.transcription_received.emit(greeting)
 
-        # File d'attente pour l'audio PCM à jouer
+        # File d'attente asynchrone (Production)
         self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
 
         # Stream sounddevice avec callback non-bloquant (Glitch-Free)
@@ -946,17 +988,21 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
             log.info("🔌 Session Ollama fermée.")
 
     def _append_audio_chunk(self, chunk):
-        """Découpe et envoie les données dans la queue synchrone."""
-        # On découpe en blocs de taille FRAME_SIZE pour le callback
+        """Découpe et envoie les données dans la queue synchrone (Producteur)."""
+        # S'assurer que le chunk est en int16 et mono
+        if chunk is None or len(chunk) == 0: return
+
+        # On découpe en blocs exacts de taille FRAME_SIZE pour le callback sounddevice
         for i in range(0, len(chunk), FRAME_SIZE):
             segment = chunk[i:i + FRAME_SIZE]
             if len(segment) < FRAME_SIZE:
-                # Padding silence si dernier bloc trop petit
                 pad = np.zeros(FRAME_SIZE - len(segment), dtype=np.int16)
                 segment = np.concatenate([segment, pad])
+
             try:
                 self.output_queue.put(segment, block=False)
             except queue.Full:
+                # En production, on pourrait attendre un peu ou logger
                 break
 
     def _clear_audio_buffer(self):
@@ -967,57 +1013,42 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
             except queue.Empty:
                 break
 
-    def _execute_command(self, cmd_tag: str):
-        """Parse et exécute un bloc [CMD: ...]."""
+    def _execute_command(self, cmd_tag: str) -> str:
+        """Parse et exécute un bloc [CMD: ...] avec retour d'état."""
         try:
-            # 1. Nettoyage déterministe du bloc
-            inner = cmd_tag.strip()
-            if inner.startswith("[CMD:"): inner = inner[5:]
-            if inner.endswith("]"): inner = inner[:-1]
-            inner = inner.strip()
+            cmd_name, args = CommandParser.parse_call(cmd_tag)
 
-            # 2. Extraction du nom et des arguments via un parseur d'état simple
-            if "(" not in inner: return
-            cmd_name = inner.split("(")[0].strip()
-            raw_args = inner[len(cmd_name):].strip("() ")
+            # Anti-loop system
+            if not self.tools.can_execute(f"{cmd_name}:{args}"):
+                return "FAILED: Action on cooldown to prevent looping"
 
-            # Split des arguments en gérant les quotes
-            args = [a.strip().strip("'\"") for a in raw_args.split(",") if a.strip()]
+            # Dispatching
+            result = "SUCCESS: Action executed"
 
-            # 3. Filtrage Whitelist
-            if cmd_name not in ALLOWED_COMMANDS:
-                log.warning(f"⚠️ Commande rejetée (Hors Whitelist) : {cmd_name}")
-                return
-
-            log.info(f"⚙️ Action : {cmd_name}({args})")
-
-            # 4. Dispatching vers les Handlers
             if cmd_name == "OPEN_APP":
-                CommandExecutor.safe_execute("OPEN_APP", args)
-                if "spotify" in args[0].lower():
+                result = CommandExecutor.execute("OPEN_APP", args)
+                if "SUCCESS" in result and "spotify" in str(args).lower():
                     threading.Thread(target=lambda: (time.sleep(3), pyautogui.press('enter')), daemon=True).start()
 
             elif cmd_name == "SEARCH_WEB":
-                CommandExecutor.safe_execute("SEARCH_WEB", args)
+                result = CommandExecutor.execute("SEARCH_WEB", args)
 
             elif cmd_name == "PLAY_MUSIC":
                 query = args[0].lower()
                 target_url = None
-                is_local = False
                 for keyword, url in PLAYLISTS.items():
                     if keyword in query:
                         target_url = url; break
-                if not target_url and any(w in query for w in ["local", "mon pc", "ordinateur"]):
-                    is_local = True
 
-                if is_local:
-                    CommandExecutor.safe_execute("START_FILE", [r'C:\musique'])
+                if not target_url and any(w in query for w in ["local", "mon pc"]):
+                    result = CommandExecutor.execute("START_FILE", [r'C:\musique'])
                 else:
                     url = target_url or f"https://www.youtube.com/results?search_query={args[0]}"
                     webbrowser.open(url)
                     threading.Thread(target=lambda: (time.sleep(5), pyautogui.press('space')), daemon=True).start()
+                    result = f"SUCCESS: Music started on {url}"
 
-            elif cmd_name == "SAVE_FACT" and len(args) >= 2:
+            elif cmd_name == "SAVE_FACT":
                 self.memory.save_memory(args[0], args[1])
             elif cmd_name == "DELETE_FACT":
                 self.memory.delete_memory(args[0])
@@ -1027,8 +1058,8 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
                 self.current_language = args[0].lower()
             elif cmd_name == "GET_GPU_TEMP":
                 temp = self.gpu_mon.get_temperature()
-                log.info(f"🔥 Température GPU : {temp}°C")
-            elif cmd_name == "SPLIT_SCREEN" and len(args) >= 2:
+                result = f"SUCCESS: GPU Temperature is {temp}°C"
+            elif cmd_name == "SPLIT_SCREEN":
                 try:
                     windows = gw.getAllWindows()
                     w1 = [w for w in windows if args[0].lower() in w.title.lower()]
@@ -1036,12 +1067,13 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
                     if w1 and w2:
                         w1[0].restore(); w1[0].moveTo(0, 0); w1[0].resizeTo(960, 1080)
                         w2[0].restore(); w2[0].moveTo(960, 0); w2[0].resizeTo(960, 1080)
-                except Exception as e: log.error(f"Split Error: {e}")
+                        result = "SUCCESS: Windows split"
+                    else: result = "FAILED: Windows not found"
+                except Exception as e: result = f"FAILED: {e}"
             elif cmd_name == "WORK_MODE":
-                CommandExecutor.safe_execute("OPEN_APP", ["vscode"])
+                CommandExecutor.execute("OPEN_APP", ["vscode"])
                 self._execute_command("[CMD: PLAY_MUSIC('triste')]")
-                pdf_path = os.path.join(os.environ['USERPROFILE'], 'Documents', 'cours.pdf')
-                CommandExecutor.safe_execute("START_FILE", [pdf_path])
+                result = "SUCCESS: Work mode activated"
             elif cmd_name == "GET_WEATHER":
                 webbrowser.open(f"https://www.google.com/search?q=meteo+{args[0]}")
             elif cmd_name == "CALC_TRIP":
@@ -1055,8 +1087,13 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
             elif cmd_name == "HA_CONTROL":
                 asyncio.create_task(self._ha_control(args[0], args[1]))
 
+            log.info(f"➡️ Result : {result}")
+            return result
+
         except Exception as e:
-            log.error(f"❌ Erreur critique Parser/Executor sur {cmd_tag} : {e}")
+            err = f"FAILED: {str(e)}"
+            log.error(f"❌ Parser/Executor Error: {err}")
+            return err
 
     async def _screenshot_and_analyze(self):
         """Prend une capture d'écran et l'analyse via Ollama (Moondream)."""
@@ -1134,13 +1171,18 @@ Exemple : "Tout de suite {self.user_name}. [CMD: PLAY_MUSIC('triste')]"
                 current_sentence += token
                 full_response += token
 
-                # Détection de commandes au fil de l'eau
-                if "]" in token and "[CMD:" in full_response:
-                    cmd_match = re.search(r"(\[CMD:.*?\])", full_response)
-                    if cmd_match:
-                        cmd_tag = cmd_match.group(1)
-                        self._execute_command(cmd_tag)
-                        # On retire le tag du texte pour ne pas que le TTS le lise
+                # Détection de commandes déterministe
+                if "]" in token:
+                    extracted_cmds = CommandParser.extract_all(full_response)
+                    for cmd_tag in extracted_cmds:
+                        if cmd_tag not in full_response: continue # Déjà traitée
+
+                        cmd_result = self._execute_command(cmd_tag)
+
+                        # Injection du résultat dans l'historique pour le feedback loop du LLM
+                        self.history.append({"role": "system", "content": f"Command Result: {cmd_result}"})
+
+                        # Retrait du tag pour le TTS
                         current_sentence = current_sentence.replace(cmd_tag, "")
                         full_response = full_response.replace(cmd_tag, "")
 
