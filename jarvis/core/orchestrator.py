@@ -19,7 +19,7 @@ from jarvis.actions.executor import CommandExecutor
 from jarvis.tts.engine import TextToSpeech
 
 class Jarvis:
-    """Unique central Orchestrator managing state and delegation."""
+    """Production-Grade Orchestrator with Barge-in, ActionGuard and Feedback-loop."""
 
     def __init__(self, signals=None):
         self.signals = signals
@@ -37,10 +37,21 @@ class Jarvis:
         self._speech_buffer = []
         self._silence_count = 0
         self._is_listening = False
-        self.playback_queue = queue.Queue(maxsize=100)
 
         self.user_name = self.memory.get_user_name()
-        self.history = [{"role": "system", "content": f"Tu es JARVIS. Concis. Utilisateur: {self.user_name}."}]
+        # Initial prompt lock (French, Role, Memory)
+        self.history = [
+            {"role": "system", "content": f"""Tu es JARVIS, assistant de {self.user_name}.
+Tu réponds en Français, de manière ultra-concise.
+L'utilisateur s'appelle {self.user_name}.
+
+PROTOCOLE ACTIONS :
+- Si une commande est requise, utilise [CMD: NOM_ACTION('arg')].
+- Si une commande a échoué précédemment (FAILED), analyse l'erreur et tente une alternative.
+
+MÉMOIRE : {self.memory.get_all_context()}
+"""}
+        ]
 
     async def _audio_listener(self):
         async for frame in audio_frame_generator(self.context):
@@ -49,9 +60,15 @@ class Jarvis:
                 if not self._is_listening:
                     self._is_listening = True
                     self.context.set_state(JarvisState.LISTENING)
-                    if hasattr(self, "_resp_task") and not self._resp_task.done(): self._resp_task.cancel()
-                    self._clear_playback()
+
+                    # 🛑 STOP ATOMIQUE (Barge-in instantané)
+                    self.context.trigger_stop()
+                    if hasattr(self, "_resp_task") and not self._resp_task.done():
+                        self._resp_task.cancel()
+
+                    self.context.reset_stop_event()
                     self._speech_buffer = list(self._pre_roll)
+
                 self._speech_buffer.append(frame)
                 self._silence_count = 0
             elif self._is_listening:
@@ -68,90 +85,109 @@ class Jarvis:
                             if self.signals: self.signals.transcription_received.emit(transcript)
                             yield transcript
                     self._speech_buffer = []
-            else: self._pre_roll.append(frame)
+            else:
+                self._pre_roll.append(frame)
 
     async def run(self):
-        log.info(f"🚀 JARVIS Orchestrator actif.")
+        log.info(f"🚀 JARVIS Production V5.1 (RTX 3070 Ti) Ready.")
 
+        # sounddevice callback (Sync context)
         def audio_cb(outdata, frames, time, status):
             try:
-                data = self.playback_queue.get_nowait()
+                data = self.context.playback_sync_queue.get_nowait()
                 outdata[:, 0] = data
-            except queue.Empty: outdata.fill(0)
+            except queue.Empty:
+                outdata.fill(0)
 
-        stream = sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", callback=audio_cb, blocksize=FRAME_SIZE)
+        stream = sd.OutputStream(
+            samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+            callback=audio_cb, blocksize=FRAME_SIZE
+        )
         stream.start()
 
+        # Playback worker (Producer for sounddevice)
         async def playback_manager():
             while True:
-                chunk = await self.context.audio_output_queue.get()
-                if chunk is None: break
-                for i in range(0, len(chunk), FRAME_SIZE):
-                    seg = chunk[i:i+FRAME_SIZE]
-                    if len(seg) < FRAME_SIZE: seg = np.concatenate([seg, np.zeros(FRAME_SIZE-len(seg), dtype=np.int16)])
-                    self.playback_queue.put(seg)
-                if self.context.audio_output_queue.empty(): self.context.is_speaking = False
+                try:
+                    pcm_phrase = await self.context.audio_output_queue.get()
+                    if pcm_phrase is None: break
+
+                    for i in range(0, len(pcm_phrase), FRAME_SIZE):
+                        if self.context.stop_event.is_set(): break
+                        chunk = pcm_phrase[i:i+FRAME_SIZE]
+                        if len(chunk) < FRAME_SIZE:
+                            chunk = np.concatenate([chunk, np.zeros(FRAME_SIZE-len(chunk), dtype=np.int16)])
+                        self.context.playback_sync_queue.put(chunk, timeout=0.1)
+
+                    self.context.audio_output_queue.task_done()
+                    if self.context.audio_output_queue.empty():
+                        self.context.is_speaking = False
+                except asyncio.CancelledError: break
+                except Exception as e: log.error(f"Playback Error: {e}")
 
         pb_task = asyncio.create_task(playback_manager())
-        await self.tts.speak(f"Bonjour {self.user_name}.", self.context)
+        await self.tts.speak(f"Bonjour {self.user_name}. Prêt à vous aider.", self.context)
 
         try:
             async for text in self._audio_listener():
+                self.context.reset_stop_event()
                 self._resp_task = asyncio.create_task(self._process(text))
-                await self._resp_task
         finally:
             stream.stop(); stream.close()
-            await self.context.audio_output_queue.put(None); await pb_task
+            pb_task.cancel()
             await self.llm.close()
-
-    def _clear_playback(self):
-        while not self.playback_queue.empty():
-            try: self.playback_queue.get_nowait()
-            except: break
-        self.context.is_speaking = False
 
     async def _process(self, text):
         self.context.set_state(JarvisState.THINKING)
         if self.signals: self.signals.thinking_state_changed.emit(True)
         self.history.append({"role": "user", "content": text})
 
-        resp = ""
-        sentence = ""
+        full_resp = ""
+        current_sentence = ""
         endings = re.compile(r'(?<=[.!?])\s+')
 
         try:
             async for token in self.llm.generate_stream(self.history):
-                sentence += token
-                resp += token
+                if self.context.stop_event.is_set(): return
+
+                current_sentence += token
+                full_resp += token
+
+                # Action Interceptor
                 if "]" in token:
-                    for tag in CommandParser.extract_all(resp):
+                    for tag in CommandParser.extract_all(full_resp):
                         n, a = CommandParser.parse_call(tag)
                         self.context.set_state(JarvisState.EXECUTING)
-                        res = self.executor.execute(n, a)
-                        # Complex actions handled by orchestrator via memory or extra tools
-                        if res == "HANDLED_BY_ORCHESTRATOR":
-                            if n == "SAVE_FACT": self.memory.save_memory(a[0], a[1]); res = "SUCCESS"
-                            elif n == "GET_GPU_TEMP": res = f"GPU: {self.gpu_mon.get_temperature()}°C"
 
-                        self.history.append({"role": "system", "content": f"Command Result: {res}"})
-                        sentence = sentence.replace(tag, ""); resp = resp.replace(tag, "")
+                        # Command Feedback Loop
+                        res = self.executor.execute(n, a)
+                        if "FAILED" in res and n == "SAVE_FACT":
+                            self.memory.save_memory(a[0], a[1])
+                            res = "SUCCESS: Fact stored in memory."
+
+                        self.history.append({"role": "system", "content": f"ACTION_FEEDBACK: {res}"})
+                        sentence = sentence.replace(tag, "") if 'sentence' in locals() else ""
+                        current_sentence = current_sentence.replace(tag, "")
+                        full_resp = full_resp.replace(tag, "")
                         self.context.set_state(JarvisState.THINKING)
 
+                # Sentence streaming for TTS
                 if any(c in token for c in ".!?"):
-                    parts = endings.split(sentence)
+                    parts = endings.split(current_sentence)
                     if len(parts) > 1:
                         for i in range(len(parts)-1):
                             s = re.sub(r"\[CMD:.*?\]", "", parts[i]).strip()
-                            if s:
+                            if s and not self.context.stop_event.is_set():
                                 self.context.set_state(JarvisState.SPEAKING)
                                 await self.tts.speak(s, self.context)
-                        sentence = parts[-1]
+                        current_sentence = parts[-1]
 
-            if sentence.strip():
-                s = re.sub(r"\[CMD:.*?\]", "", sentence).strip()
-                if s: await self.tts.speak(s, self.context)
+            if current_sentence.strip() and not self.context.stop_event.is_set():
+                await self.tts.speak(current_sentence.strip(), self.context)
 
-            self.history.append({"role": "assistant", "content": resp})
+            self.history.append({"role": "assistant", "content": full_resp})
             self.context.set_state(JarvisState.IDLE)
             if self.signals: self.signals.thinking_state_changed.emit(False)
-        except Exception as e: log.error(f"Orchestrator Error: {e}")
+        except Exception as e:
+            log.error(f"Process Error: {e}")
+            self.context.set_state(JarvisState.IDLE)

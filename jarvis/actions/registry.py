@@ -30,12 +30,12 @@ class ActionRegistry:
         target = AppResolver.find_app(app_name)
         if os.path.exists(target) or target.endswith(".exe") or target.endswith(".lnk"):
             os.startfile(target)
-            return f"SUCCESS: {app_name} launched"
-        return f"FAILED: {app_name} not found"
+            return f"Application {app_name} lancée avec succès."
+        return f"Erreur : Impossible de trouver l'application {app_name}."
 
     def _search_web(self, query: str) -> str:
         webbrowser.open(f"https://www.google.com/search?q={query}")
-        return "SUCCESS"
+        return f"Recherche Google lancée pour : {query}"
 
     def _play_music(self, query: str) -> str:
         query = query.lower()
@@ -43,4 +43,4 @@ class ActionRegistry:
                    f"https://www.youtube.com/results?search_query={query}")
         webbrowser.open(url)
         threading.Thread(target=lambda: (time.sleep(5), pyautogui.press('space')), daemon=True).start()
-        return "SUCCESS"
+        return f"Musique lancée sur {url}"

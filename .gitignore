@@ -5,6 +5,3 @@ __pycache__/
 .env
 .vscode/
 ffmpeg/
-memory.db
-logs/
-*.db
