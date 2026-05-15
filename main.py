@@ -154,11 +154,12 @@ PLAYLISTS = {
 # ----------------------------------------------------------------------
 # Command Configuration & Security Whitelist
 # ----------------------------------------------------------------------
-# Mapping sécurisé des applications vers des chemins absolus vérifiés
+# Mapping dynamique des applications via variables d'environnement
+USER_PROFILE = os.environ.get('USERPROFILE', r'C:\Users\Fusion')
 APP_WHITELIST = {
-    "vscode": r"C:\Users\Fusion\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-    "spotify": r"C:\Users\Fusion\AppData\Roaming\Spotify\Spotify.exe",
-    "discord": r"C:\Users\Fusion\AppData\Local\Discord\Update.exe",
+    "vscode": os.path.join(USER_PROFILE, r"AppData\Local\Programs\Microsoft VS Code\Code.exe"),
+    "spotify": os.path.join(USER_PROFILE, r"AppData\Roaming\Spotify\Spotify.exe"),
+    "discord": os.path.join(USER_PROFILE, r"AppData\Local\Discord\Update.exe"),
     "chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     "calculatrice": "calc.exe",
 }
@@ -647,21 +648,74 @@ class WakeWordDetector:
             self.recorder.stop()
 
 # ----------------------------------------------------------------------
-# Helper: Command Executor (Zero-Trust) & Tool Manager (Anti-Loop)
+# Helper: Windows App Resolver
 # ----------------------------------------------------------------------
-class ToolManager:
-    """Gère l'historique des actions et les cooldowns pour éviter les boucles."""
-    def __init__(self):
-        self.last_actions: Dict[str, float] = {}
-        self.cooldown = 5.0 # secondes
+class AppResolver:
+    """Résout dynamiquement les chemins des applications Windows."""
+    @staticmethod
+    def find_app(app_name: str) -> str:
+        # 1. Check Whitelist first
+        if app_name in APP_WHITELIST:
+            return APP_WHITELIST[app_name]
 
-    def can_execute(self, cmd_id: str) -> bool:
+        # 2. Try simple command (for apps in PATH)
+        try:
+            full_path = subprocess.check_output(['where', app_name], stderr=subprocess.STNULL).decode().splitlines()[0]
+            return full_path
+        except: pass
+
+        # 3. Registry Lookup (Example for VS Code)
+        if "code" in app_name.lower() or "vscode" in app_name.lower():
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Applications\Code.exe\shell\open\command")
+                val, _ = winreg.QueryValueEx(key, "")
+                return val.split('"')[1]
+            except: pass
+
+        return app_name # Fallback to name
+
+# ----------------------------------------------------------------------
+# Helper: Command Executor (Zero-Trust) & Guardrail (Anti-Loop)
+# ----------------------------------------------------------------------
+class ActionGuard:
+    """Gère les cooldowns, l'historique et bloque les répétitions abusives."""
+    def __init__(self, cooldown: float = 10.0):
+        self.cooldown = cooldown
+        self.history: List[Dict[str, Any]] = []
+        self.last_execution: Dict[str, float] = {}
+        self.failed_counts: Dict[str, int] = {}
+
+    def is_blocked(self, cmd_id: str) -> bool:
         now = time.time()
-        if cmd_id in self.last_actions:
-            if now - self.last_actions[cmd_id] < self.cooldown:
-                return False
-        self.last_actions[cmd_id] = now
-        return True
+
+        # 1. Backoff : Si une commande a échoué trop de fois
+        if self.failed_counts.get(cmd_id, 0) >= 2:
+            log.error(f"⛔ Commande bannie (trop d'échecs) : {cmd_id}")
+            return True
+
+        # 2. Cooldown Check
+        if cmd_id in self.last_execution:
+            if now - self.last_execution[cmd_id] < self.cooldown:
+                log.warning(f"🚫 Action bloquée (Cooldown 10s) : {cmd_id}")
+                return True
+
+        # 3. Duplicate Loop Check (3 dernières actions identiques)
+        if len(self.history) >= 3:
+            recent_cmds = [h['cmd_id'] for h in self.history[-3:]]
+            if all(c == cmd_id for c in recent_cmds):
+                log.error(f"🛑 Boucle infinie détectée pour {cmd_id}.")
+                return True
+
+        self.last_execution[cmd_id] = now
+        return False
+
+    def record_result(self, cmd_id: str, status: str):
+        self.history.append({"cmd_id": cmd_id, "status": status, "ts": time.time()})
+        if "FAILED" in status:
+            self.failed_counts[cmd_id] = self.failed_counts.get(cmd_id, 0) + 1
+        else:
+            self.failed_counts[cmd_id] = 0 # Reset si succès
 
 class CommandExecutor:
     """Exécute des commandes système avec validation stricte (Zero-Trust)."""
@@ -676,15 +730,15 @@ class CommandExecutor:
         try:
             if cmd_name == "OPEN_APP":
                 app_id = args[0].lower()
-                if app_id == "youtube": # Cas spécial mapping URL
+                if app_id == "youtube":
                     webbrowser.open("https://youtube.com")
-                    return "SUCCESS: YouTube opened in browser"
+                    return "REAL_SUCCESS: YouTube opened"
 
-                if app_id in APP_WHITELIST:
-                    target = APP_WHITELIST[app_id]
+                target = AppResolver.find_app(app_id)
+                if os.path.exists(target) or target.endswith(".exe"):
                     subprocess.Popen([target], shell=False)
-                    return f"SUCCESS: {app_id} launched"
-                return f"FAILED: {app_id} is not in whitelist"
+                    return f"REAL_SUCCESS: {app_id} launched"
+                return f"FAILED: App {app_id} not found at {target}"
 
             elif cmd_name == "SEARCH_WEB":
                 webbrowser.open(f"https://www.google.com/search?q={args[0]}")
@@ -746,6 +800,25 @@ class GpuMonitor:
         return -1
 
 # ----------------------------------------------------------------------
+# Agent Core: State Machine & Intent Classification
+# ----------------------------------------------------------------------
+class JarvisState:
+    CHAT = "CHAT"
+    ACTION = "ACTION"
+    MEMORY = "MEMORY"
+    BLOCKED = "BLOCKED"
+
+class IntentClassifier:
+    @staticmethod
+    def classify(text: str) -> str:
+        text = text.lower()
+        # Mots-clés déclencheurs d'action
+        action_keywords = ["ouvre", "lance", "cherche", "musique", "température", "mémorise", "rappelle"]
+        if any(kw in text for kw in action_keywords):
+            return JarvisState.ACTION
+        return JarvisState.CHAT
+
+# ----------------------------------------------------------------------
 # Orchestrateur principal – boucle async
 # ----------------------------------------------------------------------
 class Jarvis:
@@ -757,7 +830,7 @@ class Jarvis:
         self.memory = JarvisMemory()
         self.audio_ctrl = AudioController()
         self.gpu_mon = GpuMonitor()
-        self.tools = ToolManager()
+        self.guard = ActionGuard()
         self.vad = VoiceActivityDetector()
         self.stt = SpeechToText()
         self.llm = LlmClient()
@@ -778,16 +851,17 @@ class Jarvis:
         self.current_language = "fr"
 
         self.history = [
-            {"role": "system", "content": f"""Tu es JARVIS, un assistant de type 'Reasoning & Action'.
-Ton objectif est l'efficacité absolue. Tu réponds en Français, de manière ultra-concise.
+            {"role": "system", "content": f"""Tu es JARVIS, un agent de type 'Chain-of-Thought'.
+Ton objectif est l'action déterministe. Tu réponds en Français, de manière ultra-concise.
 
-MÉTHODE DE RÉFLEXION :
-1. ANALYSE : Identifie l'intention (Discussion ou Action ?).
-2. PLAN : Si une action est utile, choisis l'outil dans la Whitelist.
-3. ACTION : Génère le tag [CMD: ...] immédiatement.
-4. FEEDBACK : Utilise les 'Command Result' injectés dans l'historique pour confirmer le succès.
+PROTOCOLE DE RÉPONSE :
+1. PENSÉE : Analyse l'intention (Conversation ou Commande ?).
+2. ACTION : Si une commande est requise, génère-la SYSTÉMATIQUEMENT au début.
+3. VÉRIFICATION : Si une action a échoué précédemment, propose une alternative ou cherche sur le web.
 
 CONSIGNES CRITIQUES :
+- Ne propose JAMAIS d'actions si l'utilisateur pose une question simple (ex: "Tu peux parler ?").
+- Si l'utilisateur mentionne une application, AGIS immédiatement sans demander de permission.
 - Ne sois jamais bavard. Pas de politesse inutile, pas de disclaimer d'IA.
 - Si l'utilisateur dit "Triste", lance la musique triste : [CMD: PLAY_MUSIC('triste')].
 - Si l'utilisateur demande si tu peux parler, réponds simplement par l'affirmative, ne déclenche pas d'outil.
@@ -868,11 +942,26 @@ Exemple : "C'est fait, {self.user_name}. [CMD: OPEN_APP('spotify')]"
                             transcript = await self.stt.transcribe(self._speech_buffer, language=self.current_language)
                             self.audio_ctrl.set_ducking(False)
 
-                            # WHISPER HALLUCINATION FILTER (Duration + Keywords)
-                            hallucinations = ["Merci d'avoir regardé", "Bye", "C'est tout", "S'abonner", "vidéo"]
-                            if duration < 1.5 and any(h.lower() in transcript.lower() for h in hallucinations):
-                                log.info(f"🤫 Hallucination filtrée ({duration:.1f}s) : {transcript}")
-                                transcript = ""
+                            # WHISPER HALLUCINATION FILTER (Production Grade)
+                            hallucinations = [
+                                "Merci d'avoir regardé", "Bye", "C'est tout", "S'abonner", "vidéo",
+                                "Mettez un pouce bleu", "Sous-titres", "Transcription", "J'avise que"
+                            ]
+                            # Filtre de durée, de mots-clés et d'entropie simple
+                            if transcript:
+                                clean_t = transcript.strip()
+                                # 1. Exact match parasites
+                                blacklist = ["Merci d'avoir regardé cette vidéo.", "Merci.", "Bye.", "C'est tout."]
+                                if clean_t in blacklist:
+                                    transcript = ""
+                                # 2. Duration based filtering
+                                elif duration < 1.5 and any(h.lower() in clean_t.lower() for h in hallucinations):
+                                    log.info(f"🤫 Hallucination filtrée ({duration:.1f}s) : {transcript}")
+                                    transcript = ""
+                                # 3. Entropy check (too many repetitions)
+                                elif len(set(clean_t.split())) < len(clean_t.split()) / 3 and len(clean_t.split()) > 5:
+                                    log.warning(f"🌀 Entropie trop faible (Répétition détectée) : {transcript}")
+                                    transcript = ""
 
                             if transcript:
                                 log.info(f"🗣️ Transcription : {transcript}")
@@ -1014,15 +1103,16 @@ Exemple : "C'est fait, {self.user_name}. [CMD: OPEN_APP('spotify')]"
                 break
 
     def _execute_command(self, cmd_tag: str) -> str:
-        """Parse et exécute un bloc [CMD: ...] avec retour d'état."""
+        """Parse et exécute un bloc [CMD: ...] avec retour d'état et guardrail."""
         try:
             cmd_name, args = CommandParser.parse_call(cmd_tag)
+            cmd_id = f"{cmd_name}:{args}"
 
-            # Anti-loop system
-            if not self.tools.can_execute(f"{cmd_name}:{args}"):
-                return "FAILED: Action on cooldown to prevent looping"
+            # 1. Action Guardrail (Anti-loop)
+            if self.guard.is_blocked(cmd_id):
+                return "BLOCKED: Action frequency too high or loop detected"
 
-            # Dispatching
+            # 2. Dispatching
             result = "SUCCESS: Action executed"
 
             if cmd_name == "OPEN_APP":
@@ -1088,6 +1178,7 @@ Exemple : "C'est fait, {self.user_name}. [CMD: OPEN_APP('spotify')]"
                 asyncio.create_task(self._ha_control(args[0], args[1]))
 
             log.info(f"➡️ Result : {result}")
+            self.guard.record_result(cmd_id, result)
             return result
 
         except Exception as e:
@@ -1153,8 +1244,12 @@ Exemple : "C'est fait, {self.user_name}. [CMD: OPEN_APP('spotify')]"
 
     async def _process_and_respond(self, user_text: str):
         """
-        Gère le flux : LLM stream -> Découpage en phrases -> TTS.
+        Orchestrateur Agentique : Perception -> Classification -> Raisonnement -> Action.
         """
+        # 1. Classification d'Intention
+        intent = IntentClassifier.classify(user_text)
+        log.info(f"🎯 Intention détectée : {intent}")
+
         sentence_endings = re.compile(r'(?<=[.!?])\s+')
         current_sentence = ""
         full_response = ""
@@ -1163,8 +1258,12 @@ Exemple : "C'est fait, {self.user_name}. [CMD: OPEN_APP('spotify')]"
         if self.signals:
             self.signals.thinking_state_changed.emit(True)
 
-        # Ajouter le message utilisateur à l'historique
-        self.history.append({"role": "user", "content": user_text})
+        # 2. Construction du prompt enrichi avec l'état
+        prompt_with_state = user_text
+        if intent == JarvisState.CHAT:
+            prompt_with_state += " (Note: Réponds simplement à la discussion, aucune action système n'est requise ici.)"
+
+        self.history.append({"role": "user", "content": prompt_with_state})
 
         try:
             async for token in self.llm.generate_stream(self.history):
