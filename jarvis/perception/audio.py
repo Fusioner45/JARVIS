@@ -7,12 +7,12 @@ from jarvis.utils.logger import audio_log as log
 from jarvis.core.context import JarvisContext
 
 async def audio_frame_generator(context: JarvisContext):
-    """Yields audio frames from microphone. Discards input if JARVIS is speaking."""
+    """Captures microphone audio and yields PCM frames. Discards if JARVIS is speaking."""
     loop = asyncio.get_running_loop()
     q = asyncio.Queue()
 
     def callback(indata, frames, time, status):
-        if status: log.warning(f"Audio status: {status}")
+        if status: log.warning(f"Audio Status: {status}")
         if context.is_speaking: return
 
         mono = indata[:, 0] if indata.ndim > 1 else indata
@@ -21,7 +21,7 @@ async def audio_frame_generator(context: JarvisContext):
 
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
                         blocksize=FRAME_SIZE, callback=callback):
-        log.info("🎤 Microphone actif.")
+        log.info("🎤 Microphone actif - Écoute en cours.")
         while True:
             frame = await q.get()
             yield frame
@@ -33,7 +33,7 @@ class VoiceActivityDetector:
 
     def is_speech(self, frame: bytes, threshold: float = 0.5) -> bool:
         audio_int16 = np.frombuffer(frame, dtype=np.int16)
-        # RMS filter
+        # Energy filter (RMS)
         rms = np.sqrt(np.mean(audio_int16.astype(np.float32)**2)) / 32768.0
         if rms < 0.01: return False
 

@@ -19,6 +19,8 @@ from jarvis.actions.executor import CommandExecutor
 from jarvis.tts.engine import TextToSpeech
 
 class Jarvis:
+    """Unique central Orchestrator managing state and delegation."""
+
     def __init__(self, signals=None):
         self.signals = signals
         self.context = JarvisContext()
@@ -29,6 +31,7 @@ class Jarvis:
         self.stt = SpeechToText()
         self.llm = LlmClient()
         self.tts = TextToSpeech()
+        self.executor = CommandExecutor()
 
         self._pre_roll = deque(maxlen=10)
         self._speech_buffer = []
@@ -36,7 +39,8 @@ class Jarvis:
         self._is_listening = False
         self.playback_queue = queue.Queue(maxsize=100)
 
-        self.history = [{"role": "system", "content": f"Tu es JARVIS. Concis. Utilisateur: {self.memory.get_user_name()}. Contexte: {self.memory.get_all_context()}"}]
+        self.user_name = self.memory.get_user_name()
+        self.history = [{"role": "system", "content": f"Tu es JARVIS. Concis. Utilisateur: {self.user_name}."}]
 
     async def _audio_listener(self):
         async for frame in audio_frame_generator(self.context):
@@ -67,7 +71,7 @@ class Jarvis:
             else: self._pre_roll.append(frame)
 
     async def run(self):
-        log.info(f"🚀 JARVIS V5 Modulaire Démarré.")
+        log.info(f"🚀 JARVIS Orchestrator actif.")
 
         def audio_cb(outdata, frames, time, status):
             try:
@@ -89,7 +93,7 @@ class Jarvis:
                 if self.context.audio_output_queue.empty(): self.context.is_speaking = False
 
         pb_task = asyncio.create_task(playback_manager())
-        await self.tts.speak(f"Bonjour {self.memory.get_user_name()}.", self.context)
+        await self.tts.speak(f"Bonjour {self.user_name}.", self.context)
 
         try:
             async for text in self._audio_listener():
@@ -123,11 +127,13 @@ class Jarvis:
                     for tag in CommandParser.extract_all(resp):
                         n, a = CommandParser.parse_call(tag)
                         self.context.set_state(JarvisState.EXECUTING)
-                        res = CommandExecutor.execute(n, a, self)
+                        res = self.executor.execute(n, a)
+                        # Complex actions handled by orchestrator via memory or extra tools
                         if res == "HANDLED_BY_ORCHESTRATOR":
                             if n == "SAVE_FACT": self.memory.save_memory(a[0], a[1]); res = "SUCCESS"
-                            elif n == "INDEX_PDF": self.memory.index_pdf(a[0]); res = "SUCCESS"
-                        self.history.append({"role": "system", "content": f"Result: {res}"})
+                            elif n == "GET_GPU_TEMP": res = f"GPU: {self.gpu_mon.get_temperature()}°C"
+
+                        self.history.append({"role": "system", "content": f"Command Result: {res}"})
                         sentence = sentence.replace(tag, ""); resp = resp.replace(tag, "")
                         self.context.set_state(JarvisState.THINKING)
 

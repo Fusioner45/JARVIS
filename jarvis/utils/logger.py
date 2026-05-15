@@ -6,7 +6,6 @@ from contextlib import contextmanager
 
 def setup_logger(name: str, log_file: str, level=logging.INFO):
     formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s', datefmt="%H:%M:%S")
-
     os.makedirs('logs', exist_ok=True)
 
     handler = logging.FileHandler(f'logs/{log_file}')
@@ -31,6 +30,7 @@ system_log = setup_logger("Jarvis.System", "system.log")
 
 @contextmanager
 def perf_tracker(domain_logger, label: str):
+    """Context manager to measure and log latency of operations."""
     start = time.perf_counter()
     yield
     elapsed = (time.perf_counter() - start) * 1000

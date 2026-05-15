@@ -45,7 +45,7 @@ class LlmClient:
                         except: continue
         except Exception as e:
             log.error(f"LLM Stream Error: {e}")
-            yield "Désolé, j'ai une erreur de connexion à mon cerveau local."
+            yield "Erreur de connexion LLM."
 
 class IntentClassifier:
     @staticmethod

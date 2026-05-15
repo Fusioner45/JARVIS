@@ -12,12 +12,13 @@ class TextToSpeech:
         self.voice = EDGE_TTS_VOICE
 
     async def speak(self, text: str, context: JarvisContext):
+        """Generates speech and pushes PCM data to context queue."""
         if not text: return
-        log.info(f"🎙️ TTS : {text[:50]}...")
+        log.info(f"🎙️ TTS: {text[:50]}...")
         context.is_speaking = True
 
         try:
-            with perf_tracker(log, "TTS Generation"):
+            with perf_tracker(log, "Génération TTS"):
                 communicate = edge_tts.Communicate(text, self.voice)
                 mp3_data = io.BytesIO()
                 async for chunk in communicate.stream():
