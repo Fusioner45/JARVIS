@@ -6,4 +6,3 @@ class JarvisState(Enum):
     THINKING = auto()
     EXECUTING = auto()
     SPEAKING = auto()
-    BLOCKED = auto()
