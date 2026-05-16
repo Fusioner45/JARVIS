@@ -11,6 +11,7 @@ sounddevice==0.4.6
 soundfile==0.12.1
 pydub==0.25.1
 edge-tts==6.1.12
+gTTS==2.5.1
 pypdf==4.0.1
 PyQt6==6.6.1
 PyQt6-Qt6==6.6.1

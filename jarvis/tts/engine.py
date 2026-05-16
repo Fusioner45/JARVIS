@@ -13,8 +13,7 @@ _FFMPEG_CMD = [
     "-f", "mp3", "-i", "pipe:0",
     "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1"
 ]
-# Taille d'un chunk PCM = 100ms à 16kHz en s16le (2 bytes/sample)
-_PCM_CHUNK_BYTES = 16000 // 10 * 2  # 3200 bytes
+_PCM_CHUNK_BYTES = 16000 // 10 * 2
 
 
 def _ffmpeg_available() -> bool:
@@ -44,24 +43,34 @@ class TextToSpeech:
         context.is_speaking = True
 
         try:
-            if self._use_ffmpeg:
-                await self._speak_ffmpeg(text, context)
-            else:
-                await self._speak_pydub(text, context)
+            # First Attempt: Edge-TTS
+            success = await self._try_edge_tts(text, context)
+
+            # Second Attempt: Fallback Google TTS (via pydub/io)
+            if not success and not context.stop_event.is_set():
+                log.warning("🔄 Edge-TTS a echoue. Tentative de fallback gTTS...")
+                await self._speak_gtts(text, context)
+
         except asyncio.CancelledError:
             pass
         except Exception as e:
             log.error(f"TTS Runtime Error: {e}")
         finally:
-            # Atomic safety: If the queue is empty, we must ensure is_speaking is False
-            # so the microphone can resume.
             if context.audio_output_queue.empty():
                 context.is_speaking = False
 
-    async def _speak_ffmpeg(self, text: str, context: JarvisContext):
-        """Streaming MP3 → ffmpeg → chunks PCM. Latence ~150–300ms."""
-        communicate = edge_tts.Communicate(text, self.voice)
+    async def _try_edge_tts(self, text: str, context: JarvisContext) -> bool:
+        try:
+            if self._use_ffmpeg:
+                return await self._speak_ffmpeg(text, context)
+            else:
+                return await self._speak_pydub(text, context)
+        except Exception as e:
+            log.error(f"Edge-TTS Attempt Failed: {e}")
+            return False
 
+    async def _speak_ffmpeg(self, text: str, context: JarvisContext) -> bool:
+        communicate = edge_tts.Communicate(text, self.voice)
         proc = await asyncio.create_subprocess_exec(
             *_FFMPEG_CMD,
             stdin=asyncio.subprocess.PIPE,
@@ -72,83 +81,78 @@ class TextToSpeech:
         async def _feed_mp3():
             try:
                 async for chunk in communicate.stream():
-                    if context.stop_event.is_set():
-                        break
                     if chunk["type"] == "audio":
                         proc.stdin.write(chunk["data"])
                         await proc.stdin.drain()
-            except Exception as e:
-                log.error(f"TTS feed error: {e}")
+            except Exception:
+                proc.kill()
             finally:
-                try:
-                    proc.stdin.close()
-                except Exception:
-                    pass
+                try: proc.stdin.close()
+                except: pass
 
         feed_task = asyncio.create_task(_feed_mp3())
+        has_audio = False
 
         try:
             while True:
-                if context.stop_event.is_set():
-                    proc.kill()
-                    break
-
                 raw = await proc.stdout.read(_PCM_CHUNK_BYTES)
-                if not raw:
-                    break
-
+                if not raw: break
+                has_audio = True
                 pcm = np.frombuffer(raw, dtype=np.int16)
-
-                # Resample si SAMPLE_RATE != 16000
                 if SAMPLE_RATE != 16000:
                     factor = SAMPLE_RATE / 16000
-                    idx = np.clip(
-                        (np.arange(int(len(pcm) * factor)) / factor).astype(int),
-                        0, len(pcm) - 1
-                    )
+                    idx = np.clip((np.arange(int(len(pcm) * factor)) / factor).astype(int), 0, len(pcm) - 1)
                     pcm = pcm[idx]
-
-                if not context.stop_event.is_set():
-                    await context.audio_output_queue.put(pcm)
+                await context.audio_output_queue.put(pcm)
+            await proc.wait()
+            return has_audio
         finally:
             feed_task.cancel()
-            try:
-                await proc.wait()
-            except Exception:
-                pass
 
-    async def _speak_pydub(self, text: str, context: JarvisContext):
-        """Fallback: accumule le MP3 complet avant décodage."""
+    async def _speak_pydub(self, text: str, context: JarvisContext) -> bool:
         from pydub import AudioSegment
-
         communicate = edge_tts.Communicate(text, self.voice)
         mp3_buffer = bytearray()
-
         async for chunk in communicate.stream():
-            if context.stop_event.is_set():
-                return
             if chunk["type"] == "audio":
                 mp3_buffer.extend(chunk["data"])
-
-        if not mp3_buffer:
-            return
+        if not mp3_buffer: return False
 
         loop = asyncio.get_running_loop()
-
-        def _decode(data: bytes) -> np.ndarray:
+        def _decode(data):
             try:
                 seg = AudioSegment.from_file(io.BytesIO(data), format="mp3")
                 seg = seg.set_frame_rate(SAMPLE_RATE).set_channels(1).set_sample_width(2)
                 return np.frombuffer(seg.raw_data, dtype=np.int16)
-            except Exception as e:
-                log.error(f"TTS Pydub Decode Error: {e}")
-                return None
+            except: return None
 
         pcm = await loop.run_in_executor(None, _decode, bytes(mp3_buffer))
-
         if pcm is not None:
-            chunk_size = SAMPLE_RATE * 2  # 2s par chunk
+            chunk_size = SAMPLE_RATE * 2
             for i in range(0, len(pcm), chunk_size):
-                if context.stop_event.is_set():
-                    break
                 await context.audio_output_queue.put(pcm[i:i + chunk_size])
+            return True
+        return False
+
+    async def _speak_gtts(self, text: str, context: JarvisContext):
+        """Robust fallback using gTTS."""
+        try:
+            from gtts import gTTS
+            from pydub import AudioSegment
+            tts = gTTS(text=text, lang='fr')
+            mp3_fp = io.BytesIO()
+            tts.write_to_fp(mp3_fp)
+            mp3_fp.seek(0)
+
+            loop = asyncio.get_running_loop()
+            def _decode():
+                audio = AudioSegment.from_file(mp3_fp, format="mp3")
+                audio = audio.set_frame_rate(SAMPLE_RATE).set_channels(1).set_sample_width(2)
+                return np.frombuffer(audio.raw_data, dtype=np.int16)
+
+            pcm = await loop.run_in_executor(None, _decode)
+            if pcm is not None:
+                await context.audio_output_queue.put(pcm)
+                log.info("✅ Fallback gTTS reussi.")
+        except Exception as e:
+            log.error(f"Fallback gTTS Error: {e}")

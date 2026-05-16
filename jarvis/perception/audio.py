@@ -65,8 +65,8 @@ class VoiceActivityDetector:
         self._reset_state()
 
     def _reset_state(self):
-        self._h = np.zeros((2, 1, 64), dtype=np.float32)
-        self._c = np.zeros((2, 1, 64), dtype=np.float32)
+        # Correct Silero VAD V4/V5 state shape
+        self._state = np.zeros((2, 1, 64), dtype=np.float32)
 
     def is_speech(self, frame: bytes, threshold: float = 0.5) -> bool:
         if not frame: return False
@@ -81,14 +81,13 @@ class VoiceActivityDetector:
 
         input_data = {
             "input": audio_float32[np.newaxis, :],
-            "sr": np.array([SAMPLE_RATE], dtype=np.int64),
-            "h": self._h,
-            "c": self._c
+            "state": self._state,
+            "sr": np.array([SAMPLE_RATE], dtype=np.int64)
         }
 
         try:
-            out, h, c = self.session.run(None, input_data)
-            self._h, self._c = h, c
+            out, stateN = self.session.run(None, input_data)
+            self._state = stateN
             return out.item() > threshold
         except Exception as e:
             log.error(f"VAD Run Error: {e}")
