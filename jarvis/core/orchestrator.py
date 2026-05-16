@@ -161,12 +161,15 @@ class Jarvis:
 
     async def _process(self, text):
         start_time = time.perf_counter()
+        # History fix: Add user text immediately
+        self.history.append({"role": "user", "content": text})
+
         try:
             self.context.set_state(JarvisState.THINKING)
             if self.signals: self.signals.thinking_state_changed.emit(True)
 
             memory_ctx = self.memory.get_all_context()
-            temp_history = self.history + [{"role": "system", "content": f"Context:\n{memory_ctx}"}]
+            temp_history = self.history[:-1] + [{"role": "system", "content": f"Context:\n{memory_ctx}"}]
             temp_history.append({"role": "user", "content": text})
 
             full_resp = ""
@@ -211,7 +214,6 @@ class Jarvis:
                 self.context.set_state(JarvisState.SPEAKING)
                 await self.tts.speak(current_sentence.strip(), self.context)
 
-            self.history.append({"role": "user", "content": text})
             self.history.append({"role": "assistant", "content": full_resp})
             if len(self.history) > 20: self.history = [self.history[0]] + self.history[-10:]
 
@@ -228,14 +230,14 @@ class Jarvis:
 
     async def _ha_control(self, entity, service):
         import aiohttp, os
-        ha_url = os.getenv("HA_URL")
-        ha_token = os.getenv("HA_TOKEN")
-        if not ha_url or not ha_token:
-            log.warning("HA: variables HA_URL/HA_TOKEN manquantes.")
-            return
-        url = f"{ha_url}/api/services/{entity.split('.')[0]}/{service}"
-        headers = {"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"}
         try:
+            ha_url = os.getenv("HA_URL")
+            ha_token = os.getenv("HA_TOKEN")
+            if not ha_url or not ha_token:
+                log.warning("HA: variables HA_URL/HA_TOKEN manquantes.")
+                return
+            url = f"{ha_url}/api/services/{entity.split('.')[0]}/{service}"
+            headers = {"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"}
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     url,

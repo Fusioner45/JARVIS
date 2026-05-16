@@ -24,15 +24,21 @@ echo [JARVIS] Mise a jour de pip...
 python -m pip install --upgrade pip --quiet
 
 echo [JARVIS] Etape 1 : Installation des dependances Core (requirements.txt)...
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
 echo.
 echo [JARVIS] Etape 2 : Installation de PyTorch GPU (CUDA 12.1)...
-pip install -r requirements-gpu.txt --index-url https://download.pytorch.org/whl/cu121
+python -m pip install -r requirements-gpu.txt --index-url https://download.pytorch.org/whl/cu121
 
 echo.
 echo [JARVIS] Validation finale...
-pip check
+python -c "import PyQt6; print('PyQt6 OK'); import torch; print('Torch GPU OK')" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERREUR] L'installation semble incomplete. Verifiez les logs de pip ci-dessus.
+    echo Tentative de reparation forcee de PyQt6...
+    python -m pip install --force-reinstall PyQt6 PyQt6-Qt6
+)
+python -m pip check
 
 echo.
 echo [INFO] Pour une latence TTS optimale, assurez-vous que FFMPEG est installe.
