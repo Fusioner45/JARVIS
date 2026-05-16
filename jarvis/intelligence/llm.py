@@ -32,21 +32,20 @@ class LlmClient:
 
         start_time = time.perf_counter()
         first_token = True
+        has_yielded = False
 
         try:
             async with self.session.post(url, json=payload, timeout=60) as resp:
                 if resp.status != 200:
                     err = await resp.text()
-                    log.error(f"Ollama Response Error ({resp.status}): {err}")
-                    yield "Erreur Ollama."
+                    log.error(f"Ollama Error ({resp.status}): {err}")
                     return
 
                 async for line in resp.content:
                     if not line: continue
                     line_str = line.decode("utf-8").strip()
 
-                    if not line_str.startswith("data: "):
-                        continue
+                    if not line_str.startswith("data: "): continue
 
                     data_content = line_str[6:]
                     if data_content == "[DONE]": break
@@ -58,15 +57,15 @@ class LlmClient:
                             if first_token:
                                 log.info(f"🚀 LLM TTFT: {(time.perf_counter()-start_time)*1000:.2f}ms")
                                 first_token = False
+                            has_yielded = True
                             yield token
-                    except json.JSONDecodeError as je:
-                        log.error(f"JSON Parse Error: {je} | Raw: {data_content}")
                     except Exception as e:
-                        log.error(f"Token yield error: {e}")
+                        log.error(f"Token Error: {e}")
 
         except asyncio.TimeoutError:
-            log.error("Ollama connection timed out.")
-            yield "Délai d'attente Ollama dépassé."
+            log.error("Ollama Timeout.")
         except Exception as e:
-            log.error(f"LLM Connection Fatal: {e}")
-            yield "Erreur de connexion LLM."
+            log.error(f"LLM Connection Error: {e}")
+        finally:
+            if not has_yielded:
+                log.warning("Ollama stream ended without yielding any tokens.")

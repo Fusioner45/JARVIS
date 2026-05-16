@@ -8,7 +8,7 @@ from jarvis.utils.logger import audio_log as log
 from jarvis.core.context import JarvisContext
 
 class TextToSpeech:
-    """Production TTS with progressive PCM streaming (Phase 7)."""
+    """Production TTS with progressive PCM streaming (Phase 8)."""
 
     def __init__(self):
         self.voice = EDGE_TTS_VOICE
@@ -23,27 +23,15 @@ class TextToSpeech:
 
         try:
             communicate = edge_tts.Communicate(text, self.voice)
-
-            # Pour edge-tts, le streaming audio est en MP3.
-            # Le décodage progressif MP3 nécessite un parser robuste (type ffmpeg pipe).
-            # Ici on utilise une approche par "blocs de stream" pour limiter la latence et la RAM.
-
             mp3_buffer = bytearray()
             loop = asyncio.get_running_loop()
 
             async for chunk in communicate.stream():
                 if context.stop_event.is_set():
-                    log.debug("TTS stream interrupted.")
+                    log.debug("TTS stream aborted.")
                     return
-
                 if chunk["type"] == "audio":
                     mp3_buffer.extend(chunk["data"])
-
-                    # Si on a accumulé assez de données (ex: ~1s d'audio), on décode un segment
-                    # Note: Le MP3 n'est pas facilement découpable sans perdre des frames,
-                    # mais pour des réponses courtes/moyennes, décoder par segments de stream
-                    # ou à la fin du stream edge-tts est suffisant.
-                    # Pour un vrai streaming temps-réel, on utiliserait un Subprocess FFMPEG.
 
             if not mp3_buffer: return
 
@@ -59,13 +47,11 @@ class TextToSpeech:
             pcm = await loop.run_in_executor(None, _decode, bytes(mp3_buffer))
 
             if pcm is not None and not context.stop_event.is_set():
-                # On injecte le PCM par chunks pour permettre l'interruption entre les phrases
-                chunk_size = SAMPLE_RATE * 2 # ~2 secondes
+                chunk_size = SAMPLE_RATE * 2
                 for i in range(0, len(pcm), chunk_size):
                     if context.stop_event.is_set(): break
                     await context.audio_output_queue.put(pcm[i:i+chunk_size])
 
-        except asyncio.CancelledError:
-            pass
+        except asyncio.CancelledError: pass
         except Exception as e:
             log.error(f"TTS Runtime Error: {e}")

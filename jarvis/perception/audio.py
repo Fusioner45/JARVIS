@@ -13,19 +13,11 @@ async def audio_frame_generator(context: JarvisContext):
     q = asyncio.Queue(maxsize=200)
 
     def callback(indata, frames, time, status):
-        if status:
-            # Non-blocking log if possible
-            pass
-
-        # Security: check if loop is running
-        if not loop.is_running():
-            return
-
-        if context.is_speaking:
+        # Atomic security check: loop running? context valid?
+        if not loop.is_running() or context.is_speaking:
             return
 
         try:
-            # Atomic overflow handling
             if q.full():
                 try: q.get_nowait()
                 except asyncio.QueueEmpty: pass
@@ -33,39 +25,37 @@ async def audio_frame_generator(context: JarvisContext):
             mono = indata[:, 0] if indata.ndim > 1 else indata
             pcm16 = (mono * 32767).astype(np.int16).tobytes()
             loop.call_soon_threadsafe(q.put_nowait, pcm16)
-        except Exception:
-            pass
+        except Exception: pass
 
     try:
-        # Use explicit device if needed, here we use default
         stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
                                blocksize=FRAME_SIZE, callback=callback)
         with stream:
-            log.info("🎤 Flux audio initialisé.")
+            log.info("🎤 Microphone ouvert.")
             while True:
                 try:
-                    # Timeout as heart-beat and cancellation check
+                    # Timeout serves as heartbeat and allows checking for exit
                     frame = await asyncio.wait_for(q.get(), timeout=1.0)
-                    if frame is None: # Explicit sentinel for shutdown
-                        log.debug("Sentinel received in audio generator.")
+
+                    if frame is None: # Shutdown Sentinel
+                        log.debug("Audio generator sentinel received.")
                         break
+
                     yield frame
                 except asyncio.TimeoutError:
-                    # Check if we should exit even without sentinel
-                    if not stream.active:
-                        break
+                    if not stream.active: break
                     continue
     except asyncio.CancelledError:
-        log.info("Générateur audio annulé.")
+        log.info("Générateur audio stoppé.")
     except Exception as e:
-        log.critical(f"Critical Audio Pipe Error: {e}")
+        log.critical(f"Erreur flux audio : {e}")
     finally:
-        log.debug("Audio frame generator closed.")
+        log.debug("Perception fermée.")
 
 class VoiceActivityDetector:
     def __init__(self, model_path: str = "models/silero_vad.onnx"):
         if not os.path.exists(model_path):
-            log.error(f"VAD Model not found at {model_path}")
+            log.error(f"VAD Model missing: {model_path}")
             raise FileNotFoundError(model_path)
 
         opts = ort.SessionOptions()
@@ -101,5 +91,5 @@ class VoiceActivityDetector:
             self._h, self._c = h, c
             return out.item() > threshold
         except Exception as e:
-            log.error(f"VAD Error: {e}")
+            log.error(f"VAD Run Error: {e}")
             return False

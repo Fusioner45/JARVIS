@@ -20,7 +20,7 @@ from jarvis.actions.executor import CommandExecutor
 from jarvis.tts.engine import TextToSpeech
 
 class Jarvis:
-    """Production-Grade Orchestrator (Phase 7 - Hardened Runtime)."""
+    """Production-Grade Orchestrator (Phase 8 - Full Async)."""
 
     def __init__(self, signals=None):
         self.signals = signals
@@ -31,8 +31,7 @@ class Jarvis:
 
         try:
             self.gpu_mon = GpuMonitor()
-        except Exception as e:
-            log.warning(f"GpuMonitor Init Failed: {e}")
+        except Exception:
             self.gpu_mon = None
 
         self.vad = VoiceActivityDetector()
@@ -59,6 +58,10 @@ class Jarvis:
         self._bg_tasks.add(task)
         self.supervisor.track_task(name, task)
         task.add_done_callback(self._bg_tasks.discard)
+
+    async def _set_ducking(self, duck: bool):
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.audio_ctrl.set_ducking, duck)
 
     async def _audio_listener(self):
         async for frame in audio_frame_generator(self.context):
@@ -87,10 +90,10 @@ class Jarvis:
                     self._is_listening = False
                     self.context.set_state(JarvisState.IDLE)
                     if self._speech_buffer:
-                        self.audio_ctrl.set_ducking(True)
-                        with perf_tracker(audio_log, "End-to-End Transcription"):
+                        await self._set_ducking(True)
+                        with perf_tracker(audio_log, "End-to-End STT"):
                             transcript = await self.stt.transcribe(self._speech_buffer)
-                        self.audio_ctrl.set_ducking(False)
+                        await self._set_ducking(False)
 
                         if transcript:
                             if self.signals: self.signals.transcription_received.emit(transcript)
@@ -100,19 +103,15 @@ class Jarvis:
                 self._pre_roll.append(frame)
 
     async def run(self):
-        log.info(f"🚀 JARVIS V7.0 Hardened Runtime.")
+        log.info(f"🚀 JARVIS V8.1 Hardened Runtime.")
         self._running = True
-
-        # Start Supervisor
         self._run_bg("supervisor", self.supervisor.start())
 
         def audio_cb(outdata, frames, time, status):
-            if status: log.warning(f"Audio Out Status: {status}")
             try:
                 data = self.context.playback_sync_queue.get_nowait()
                 outdata[:, 0] = data
-            except queue.Empty: outdata.fill(0)
-            except Exception: pass
+            except (queue.Empty, Exception): outdata.fill(0)
 
         stream = sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", callback=audio_cb, blocksize=FRAME_SIZE)
         stream.start()
@@ -121,9 +120,7 @@ class Jarvis:
             while self._running:
                 try:
                     pcm_phrase = await asyncio.wait_for(self.context.audio_output_queue.get(), timeout=1.0)
-                    if pcm_phrase is None:
-                        self.context.audio_output_queue.task_done()
-                        break
+                    if pcm_phrase is None: break
 
                     for i in range(0, len(pcm_phrase), FRAME_SIZE):
                         if self.context.stop_event.is_set(): break
@@ -133,17 +130,15 @@ class Jarvis:
 
                         try:
                             self.context.playback_sync_queue.put(chunk, timeout=0.1)
-                        except queue.Full:
-                            continue
+                        except queue.Full: continue
 
                     self.context.audio_output_queue.task_done()
                     if self.context.audio_output_queue.empty(): self.context.is_speaking = False
-                except asyncio.TimeoutError: continue
-                except asyncio.CancelledError: break
-                except Exception as e: log.error(f"Playback Error: {e}")
+                except (asyncio.TimeoutError, asyncio.CancelledError): continue
+                except Exception as e: log.error(f"PB Error: {e}")
 
-        pb_task = asyncio.create_task(playback_manager())
-        self._run_bg("initial_greeting", self.tts.speak(f"Bonjour {self.user_name}.", self.context))
+        pb_task = asyncio.create_task(playback_manager(), name="playback_manager")
+        self._run_bg("greeting", self.tts.speak(f"Bonjour {self.user_name}.", self.context))
 
         try:
             async for text in self._audio_listener():
@@ -152,31 +147,25 @@ class Jarvis:
                     self._resp_task.cancel()
                 self._resp_task = asyncio.create_task(self._process(text), name="llm_process")
         except Exception as e:
-            log.critical(f"Main Loop Exception: {e}")
+            log.critical(f"Loop Exception: {e}")
         finally:
             self._running = False
             self.supervisor.stop()
-            log.info("Cleaning up resources...")
             stream.stop(); stream.close()
             self.context.trigger_stop()
-            try:
-                await asyncio.wait_for(self.context.audio_output_queue.put(None), timeout=1.0)
+            try: await asyncio.wait_for(self.context.audio_output_queue.put(None), timeout=0.5)
             except: pass
             await pb_task
-            for task in list(self._bg_tasks):
-                log.debug(f"Cancelling task: {task.get_name()}")
-                task.cancel()
+            for t in list(self._bg_tasks): t.cancel()
             await self.llm.close()
-            log.info("Shutdown complete.")
 
     async def _process(self, text):
-        start_time = time.perf_counter()
         try:
             self.context.set_state(JarvisState.THINKING)
             if self.signals: self.signals.thinking_state_changed.emit(True)
 
             memory_ctx = self.memory.get_all_context()
-            temp_history = self.history + [{"role": "system", "content": f"Mémoire:\n{memory_ctx}"}]
+            temp_history = self.history + [{"role": "system", "content": f"Context:\n{memory_ctx}"}]
             temp_history.append({"role": "user", "content": text})
 
             full_resp = ""
@@ -184,9 +173,7 @@ class Jarvis:
             endings = re.compile(r'(?<=[.!?])\s+')
 
             async for token in self.llm.generate_stream(temp_history):
-                if self.context.stop_event.is_set():
-                    log.info("LLM Generation aborted.")
-                    return
+                if self.context.stop_event.is_set(): return
 
                 current_sentence += token
                 full_resp += token
@@ -195,13 +182,13 @@ class Jarvis:
                     for tag in CommandParser.extract_all(full_resp):
                         n, a = CommandParser.parse_call(tag)
                         self.context.set_state(JarvisState.EXECUTING)
-                        res = self.executor.execute(n, a)
+                        res = await self.executor.execute(n, a)
 
                         if res == "HANDLED_ASYNC_HA":
                             self._run_bg(f"ha_{n}", self._ha_control(a[0], a[1]))
                             res = "SUCCESS: HA triggered."
                         elif res == "HANDLED_ASYNC_VISION":
-                            self._run_bg("vision_analysis", self._screenshot_and_analyze())
+                            self._run_bg("vision", self._screenshot_and_analyze())
                             res = "SUCCESS: Vision triggered."
 
                         self.history.append({"role": "system", "content": f"TOOL_RESULT: {res}"})
@@ -225,20 +212,12 @@ class Jarvis:
 
             self.history.append({"role": "user", "content": text})
             self.history.append({"role": "assistant", "content": full_resp})
-
-            # Pruning History (Phase 8)
-            if len(self.history) > 20:
-                self.history = [self.history[0]] + self.history[-10:]
-                log.info("Pruned LLM History for latency control.")
-
-            elapsed = (time.perf_counter() - start_time) * 1000
-            log.info(f"⚡ Turn Latency: {elapsed:.2f}ms")
+            if len(self.history) > 20: self.history = [self.history[0]] + self.history[-10:]
 
             self.context.set_state(JarvisState.IDLE)
             if self.signals: self.signals.thinking_state_changed.emit(False)
 
-        except asyncio.CancelledError:
-            log.debug("Process task canceled.")
+        except asyncio.CancelledError: pass
         except Exception as e:
             log.error(f"Process Error: {e}")
             self.context.set_state(JarvisState.IDLE)
@@ -250,24 +229,19 @@ class Jarvis:
         if not ha_url or not ha_token: return
         url = f"{ha_url}/api/services/{entity.split('.')[0]}/{service}"
         headers = {"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"}
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json={"entity_id": entity}, headers=headers, timeout=5) as r:
-                    log.info(f"HA Service Response: {r.status}")
-        except Exception as e: log.error(f"HA Error: {e}")
+        async with aiohttp.ClientSession() as session:
+            await session.post(url, json={"entity_id": entity}, headers=headers, timeout=5)
 
     async def _screenshot_and_analyze(self):
         import base64, io, pyautogui, aiohttp
         from jarvis.utils.config import OLLAMA_HOST
-        try:
-            screenshot = pyautogui.screenshot()
-            img_byte_arr = io.BytesIO()
-            screenshot.save(img_byte_arr, format='PNG')
-            img_base64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
-            payload = {"model": "moondream", "prompt": "Décris l'écran.", "images": [img_base64], "stream": False}
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{OLLAMA_HOST}/api/generate", json=payload, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        await self.tts.speak(f"Vision : {data.get('response', '')}", self.context)
-        except Exception as e: log.error(f"Vision Error: {e}")
+        screenshot = pyautogui.screenshot()
+        img_byte_arr = io.BytesIO()
+        screenshot.save(img_byte_arr, format='PNG')
+        img_base64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+        payload = {"model": "moondream", "prompt": "Analyse l'écran.", "images": [img_base64], "stream": False}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{OLLAMA_HOST}/api/generate", json=payload, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    await self.tts.speak(f"Vision : {data.get('response', '')}", self.context)
