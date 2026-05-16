@@ -65,8 +65,8 @@ class VoiceActivityDetector:
         self._reset_state()
 
     def _reset_state(self):
-        # Correct Silero VAD V4/V5 state shape
-        self._state = np.zeros((2, 1, 64), dtype=np.float32)
+        # Correct Silero VAD state shape for latest versions (V5 expects 128)
+        self._state = np.zeros((2, 1, 128), dtype=np.float32)
 
     def is_speech(self, frame: bytes, threshold: float = 0.5) -> bool:
         if not frame: return False
