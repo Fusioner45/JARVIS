@@ -9,7 +9,22 @@ class SpeechToText:
 
     def __init__(self):
         log.info(f"Chargement Whisper {WHISPER_MODEL_SIZE} sur {WHISPER_DEVICE}...")
-        self.model = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
+
+        try:
+            self.model = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
+            log.info("✅ Whisper charge avec succes.")
+        except Exception as e:
+            log.error(f"⚠️ Erreur lors du chargement de Whisper sur {WHISPER_DEVICE}: {e}")
+            if WHISPER_DEVICE == "cuda":
+                log.warning("🔄 Fallback sur CPU pour Whisper...")
+                try:
+                    self.model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+                    log.info("✅ Whisper charge sur CPU.")
+                except Exception as e2:
+                    log.critical(f"❌ Erreur critique : Impossible de charger Whisper sur CPU: {e2}")
+                    raise e2
+            else:
+                raise e
 
         # Blacklist de phrases typiques des hallucinations de silence Whisper
         self.blacklist = {

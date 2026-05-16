@@ -10,7 +10,7 @@ SILENCE_FRAMES_THRESHOLD = 15
 # STT Settings
 WHISPER_MODEL_SIZE = "medium"
 WHISPER_DEVICE = "cuda"
-WHISPER_COMPUTE_TYPE = "int8_float16"
+WHISPER_COMPUTE_TYPE = "float16" # Plus stable que int8_float16 sur de nombreux GPUs
 
 # LLM Settings
 OLLAMA_HOST = "http://localhost:11434"
