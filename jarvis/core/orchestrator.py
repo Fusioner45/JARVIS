@@ -117,12 +117,19 @@ class Jarvis:
         stream.start()
 
         async def playback_manager():
+            last_activity = time.perf_counter()
             while self._running:
                 try:
+                    # Watchdog: force reset is_speaking if stuck for > 5s without audio
+                    if self.context.is_speaking and (time.perf_counter() - last_activity > 5.0) and self.context.audio_output_queue.empty():
+                        log.warning("⚠️ Watchdog: is_speaking était bloqué. Reset forcé.")
+                        self.context.is_speaking = False
+
                     pcm_phrase = await asyncio.wait_for(self.context.audio_output_queue.get(), timeout=1.0)
                     if pcm_phrase is None: break
 
-                    self.context.is_speaking = True # Re-affirm speaking state
+                    self.context.is_speaking = True
+                    last_activity = time.perf_counter()
 
                     for i in range(0, len(pcm_phrase), FRAME_SIZE):
                         if self.context.stop_event.is_set(): break
@@ -136,10 +143,8 @@ class Jarvis:
 
                     self.context.audio_output_queue.task_done()
 
-                    # More robust speaking state management
                     if self.context.audio_output_queue.empty():
-                        # Tiny grace period to ensure last chunk is played
-                        await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.15) # Grace period
                         if self.context.audio_output_queue.empty():
                             self.context.is_speaking = False
 
