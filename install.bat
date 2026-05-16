@@ -18,7 +18,7 @@ if %errorlevel% neq 0 (
 echo [JARVIS] Mise a jour de pip...
 python -m pip install --upgrade pip --quiet
 
-echo [JARVIS] Etape 1 : Installation des dependances Core (requirements.txt)...
+echo [JARVIS] Etape 1 : Installation des dependances Core ^(requirements.txt^)...
 python -m pip install -r requirements.txt
 
 echo.
@@ -26,7 +26,7 @@ echo [JARVIS] Etape 2 : Detection du GPU NVIDIA...
 nvidia-smi >nul 2>&1
 if %errorlevel% equ 0 (
     echo [OK] GPU NVIDIA detecte !
-    echo [JARVIS] Installation de PyTorch GPU (CUDA 12.1)...
+    echo [JARVIS] Installation de PyTorch GPU ^(CUDA 12.1^)...
     python -m pip install -r requirements-gpu.txt --index-url https://download.pytorch.org/whl/cu121
     set PYTORCH_TYPE=GPU
 ) else (
@@ -54,7 +54,7 @@ echo.
 REM Verifier FFmpeg
 ffmpeg -version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [!] FFmpeg non detecte (optionnel mais recommande)
+    echo [!] FFmpeg non detecte ^(optionnel mais recommande^)
     echo    Commande : winget install ffmpeg
     echo.
 ) else (
@@ -65,7 +65,7 @@ if %errorlevel% neq 0 (
 REM Verifier Ollama
 ollama --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [!] Ollama non detecte (OBLIGATOIRE pour LLM)
+    echo [!] Ollama non detecte ^(OBLIGATOIRE pour LLM^)
     echo    Telecharger : https://ollama.ai
     echo.
 ) else (
@@ -82,8 +82,8 @@ echo.
 echo [IMPORTANT] Avant de lancer main.py :
 echo   1. Verifiez que Ollama tourne : ollama serve
 echo   2. Copiez .env.example en .env : copy .env.example .env
-echo   3. Editez .env avec vos parametres (HA_URL, tokens, etc)
-echo   4. (Optionnel) Installez FFmpeg pour une meilleure TTS
+echo   3. Editez .env avec vos parametres ^(HA_URL, tokens, etc^)
+echo   4. ^(Optionnel^) Installez FFmpeg pour une meilleure TTS
 echo.
 echo Commande de demarrage : python main.py
 echo.
