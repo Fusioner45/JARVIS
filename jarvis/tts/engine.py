@@ -64,8 +64,6 @@ class TextToSpeech:
             stderr=asyncio.subprocess.DEVNULL,
         )
 
-        feed_done = asyncio.Event()
-
         async def _feed_mp3():
             try:
                 async for chunk in communicate.stream():
@@ -73,6 +71,7 @@ class TextToSpeech:
                         break
                     if chunk["type"] == "audio":
                         proc.stdin.write(chunk["data"])
+                        await proc.stdin.drain()
             except Exception as e:
                 log.error(f"TTS feed error: {e}")
             finally:
@@ -80,7 +79,6 @@ class TextToSpeech:
                     proc.stdin.close()
                 except Exception:
                     pass
-                feed_done.set()
 
         feed_task = asyncio.create_task(_feed_mp3())
 

@@ -35,7 +35,7 @@ class LlmClient:
         has_yielded = False
 
         try:
-            async with self.session.post(url, json=payload, timeout=60) as resp:
+            async with self.session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
                 if resp.status != 200:
                     err = await resp.text()
                     log.error(f"Ollama Error ({resp.status}): {err}")
