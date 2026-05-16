@@ -160,6 +160,7 @@ class Jarvis:
             await self.llm.close()
 
     async def _process(self, text):
+        start_time = time.perf_counter()
         try:
             self.context.set_state(JarvisState.THINKING)
             if self.signals: self.signals.thinking_state_changed.emit(True)
@@ -178,7 +179,7 @@ class Jarvis:
                 current_sentence += token
                 full_resp += token
 
-                if "]" in token:
+                if "]" in token and "[CMD:" in full_resp:
                     for tag in CommandParser.extract_all(full_resp):
                         n, a = CommandParser.parse_call(tag)
                         self.context.set_state(JarvisState.EXECUTING)
@@ -191,7 +192,7 @@ class Jarvis:
                             self._run_bg("vision", self._screenshot_and_analyze())
                             res = "SUCCESS: Vision triggered."
 
-                        self.history.append({"role": "system", "content": f"TOOL_RESULT: {res}"})
+                        self.history.append({"role": "assistant", "content": f"[Résultat action {n}]: {res}"})
                         current_sentence = current_sentence.replace(tag, "")
                         full_resp = full_resp.replace(tag, "")
                         self.context.set_state(JarvisState.THINKING)
@@ -214,6 +215,9 @@ class Jarvis:
             self.history.append({"role": "assistant", "content": full_resp})
             if len(self.history) > 20: self.history = [self.history[0]] + self.history[-10:]
 
+            elapsed = (time.perf_counter() - start_time) * 1000
+            log.info(f"⚡ Turn Latency: {elapsed:.2f}ms")
+
             self.context.set_state(JarvisState.IDLE)
             if self.signals: self.signals.thinking_state_changed.emit(False)
 
@@ -226,22 +230,56 @@ class Jarvis:
         import aiohttp, os
         ha_url = os.getenv("HA_URL")
         ha_token = os.getenv("HA_TOKEN")
-        if not ha_url or not ha_token: return
+        if not ha_url or not ha_token:
+            log.warning("HA: variables HA_URL/HA_TOKEN manquantes.")
+            return
         url = f"{ha_url}/api/services/{entity.split('.')[0]}/{service}"
         headers = {"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"}
-        async with aiohttp.ClientSession() as session:
-            await session.post(url, json={"entity_id": entity}, headers=headers, timeout=5)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json={"entity_id": entity},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as r:
+                    log.info(f"HA Response: {r.status} for {entity}/{service}")
+        except asyncio.TimeoutError:
+            log.error(f"HA Timeout: {entity}/{service}")
+        except aiohttp.ClientError as e:
+            log.error(f"HA Network Error: {e}")
+        except Exception as e:
+            log.error(f"HA Control Error: {e}")
 
     async def _screenshot_and_analyze(self):
         import base64, io, pyautogui, aiohttp
         from jarvis.utils.config import OLLAMA_HOST
-        screenshot = pyautogui.screenshot()
-        img_byte_arr = io.BytesIO()
-        screenshot.save(img_byte_arr, format='PNG')
-        img_base64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
-        payload = {"model": "moondream", "prompt": "Analyse l'écran.", "images": [img_base64], "stream": False}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{OLLAMA_HOST}/api/generate", json=payload, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    await self.tts.speak(f"Vision : {data.get('response', '')}", self.context)
+        try:
+            loop = asyncio.get_running_loop()
+            screenshot = await loop.run_in_executor(None, pyautogui.screenshot)
+            img_byte_arr = io.BytesIO()
+            screenshot.save(img_byte_arr, format='PNG')
+            img_base64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+            payload = {
+                "model": "moondream",
+                "prompt": "Décris précisément ce que tu vois sur cet écran.",
+                "images": [img_base64],
+                "stream": False
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{OLLAMA_HOST}/api/generate",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        await self.tts.speak(
+                            f"Vision : {data.get('response', 'Aucune réponse.')}", self.context
+                        )
+                    else:
+                        log.error(f"Vision HTTP Error: {resp.status}")
+        except asyncio.TimeoutError:
+            log.error("Vision Timeout: Ollama moondream n'a pas répondu.")
+        except Exception as e:
+            log.error(f"Vision Error: {e}")

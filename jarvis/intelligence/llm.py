@@ -39,6 +39,7 @@ class LlmClient:
                 if resp.status != 200:
                     err = await resp.text()
                     log.error(f"Ollama Error ({resp.status}): {err}")
+                    yield "Erreur Ollama."
                     return
 
                 async for line in resp.content:
@@ -64,8 +65,12 @@ class LlmClient:
 
         except asyncio.TimeoutError:
             log.error("Ollama Timeout.")
+            # Restore vocal feedback on error
+            yield "Délai d'attente dépassé. Ollama ne répond pas."
         except Exception as e:
             log.error(f"LLM Connection Error: {e}")
+            # Restore vocal feedback on error
+            yield "Erreur de connexion au modèle de langage."
         finally:
             if not has_yielded:
                 log.warning("Ollama stream ended without yielding any tokens.")

@@ -10,8 +10,15 @@ class CommandParser:
 
     @staticmethod
     def extract_all(text: str) -> List[str]:
-        """Returns all [CMD: ...] blocks."""
-        return [match.group(0) for match in CommandParser.TAG_PATTERN.finditer(text)]
+        """Returns all complete [CMD: ...] blocks (deduplicated, preserve order)."""
+        seen = set()
+        results = []
+        for match in CommandParser.TAG_PATTERN.finditer(text):
+            tag = match.group(0)
+            if tag not in seen:
+                seen.add(tag)
+                results.append(tag)
+        return results
 
     @staticmethod
     def parse_call(tag: str) -> Tuple[str, List[str]]:

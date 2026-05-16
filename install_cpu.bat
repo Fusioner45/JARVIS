@@ -20,6 +20,9 @@ echo [JARVIS] Etape 2 : Installation de PyTorch CPU (OBLIGATOIRE)...
 pip install torch==2.2.1+cpu torchvision==0.17.1+cpu torchaudio==2.2.1+cpu --index-url https://download.pytorch.org/whl/cpu
 
 echo.
+echo [INFO] Pour une latence TTS optimale, assurez-vous que FFMPEG est installe.
+echo [INFO] Commande winget : winget install ffmpeg
+echo.
 echo [DONE] JARVIS est pret pour une utilisation CPU.
 pause
 endlocal

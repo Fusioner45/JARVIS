@@ -35,6 +35,9 @@ echo [JARVIS] Validation finale...
 pip check
 
 echo.
+echo [INFO] Pour une latence TTS optimale, assurez-vous que FFMPEG est installe.
+echo [INFO] Commande winget : winget install ffmpeg
+echo.
 echo [DONE] JARVIS est pret avec acceleration RTX (CUDA 12.1).
 pause
 endlocal
