@@ -7,16 +7,16 @@ FRAME_MS = 32
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_MS / 1000)
 SILENCE_FRAMES_THRESHOLD = 15
 
-# STT Settings (Hardened for startup)
-WHISPER_MODEL_SIZE = "base"
-WHISPER_DEVICE = "cpu"
-WHISPER_COMPUTE_TYPE = "int8"
+# STT Settings (Restored to High Quality CUDA)
+WHISPER_MODEL_SIZE = "medium"
+WHISPER_DEVICE = "cuda"
+WHISPER_COMPUTE_TYPE = "float16"
 
 # LLM Settings
 OLLAMA_HOST = "http://localhost:11434"
 OLLAMA_MODEL = "llama3:8b"
 
-# TTS Settings (Updated for reliability)
+# TTS Settings
 EDGE_TTS_VOICE = "fr-FR-HenriNeural"
 
 # Paths

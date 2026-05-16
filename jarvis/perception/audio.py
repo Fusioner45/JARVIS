@@ -31,7 +31,7 @@ async def audio_frame_generator(context: JarvisContext):
         stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
                                blocksize=FRAME_SIZE, callback=callback)
         with stream:
-            log.info("🎤 Microphone ouvert.")
+            log.info("🎤 Microphone ouvert - En attente de parole...")
             while True:
                 try:
                     # Timeout serves as heartbeat and allows checking for exit
@@ -72,8 +72,10 @@ class VoiceActivityDetector:
         if not frame: return False
 
         audio_int16 = np.frombuffer(frame, dtype=np.int16)
+
+        # Increase sensitivity: Lowered RMS threshold to 0.002
         rms = np.sqrt(np.mean(audio_int16.astype(np.float32)**2)) / 32768.0
-        if rms < 0.005: return False
+        if rms < 0.002: return False
 
         audio_float32 = audio_int16.astype(np.float32) / 32768.0
         if len(audio_float32) != FRAME_SIZE:
@@ -88,7 +90,14 @@ class VoiceActivityDetector:
         try:
             out, stateN = self.session.run(None, input_data)
             self._state = stateN
-            return out.item() > threshold
+            confidence = out.item()
+
+            # Debug log for significant noise
+            if confidence > threshold:
+                log.debug(f"🗣️ Parole detectee (Conf: {confidence:.2f})")
+                return True
+
+            return False
         except Exception as e:
             log.error(f"VAD Run Error: {e}")
             return False
