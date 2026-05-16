@@ -82,6 +82,9 @@ echo ================================================
 echo [DONE] JARVIS est pret !
 echo Mode : !INSTALL_MODE!
 echo.
+echo [IMPORTANT] Le premier lancement telechargera les modeles Whisper.
+echo Cela peut prendre plusieurs minutes.
+echo.
 echo Pour lancer JARVIS :
 echo .venv\Scripts\python.exe main.py
 echo ================================================

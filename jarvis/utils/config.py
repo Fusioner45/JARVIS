@@ -7,10 +7,10 @@ FRAME_MS = 32
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_MS / 1000)
 SILENCE_FRAMES_THRESHOLD = 15
 
-# STT Settings
-WHISPER_MODEL_SIZE = "medium"
-WHISPER_DEVICE = "cuda"
-WHISPER_COMPUTE_TYPE = "float16" # Plus stable que int8_float16 sur de nombreux GPUs
+# STT Settings (Hardened for startup)
+WHISPER_MODEL_SIZE = "base" # Plus rapide a telecharger et moins gourmand
+WHISPER_DEVICE = "cpu"      # On force CPU par defaut pour garantir le demarrage
+WHISPER_COMPUTE_TYPE = "int8"
 
 # LLM Settings
 OLLAMA_HOST = "http://localhost:11434"

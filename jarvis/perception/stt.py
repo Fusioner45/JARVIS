@@ -8,20 +8,23 @@ class SpeechToText:
     """Production-Grade STT with Hallucination Filtering (Phase 3)."""
 
     def __init__(self):
-        log.info(f"Chargement Whisper {WHISPER_MODEL_SIZE} sur {WHISPER_DEVICE}...")
+        log.info(f"--- INITIALISATION STT ---")
+        log.info(f"Modele: {WHISPER_MODEL_SIZE} | Device: {WHISPER_DEVICE} | Type: {WHISPER_COMPUTE_TYPE}")
 
         try:
+            # On ajoute un message pour signaler que le telechargement peut etre long au premier lancement
+            log.info(f"Chargement des poids du modele (cela peut prendre quelques minutes au premier lancement)...")
             self.model = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
-            log.info("✅ Whisper charge avec succes.")
+            log.info("✅ STT : Whisper charge avec succes.")
         except Exception as e:
-            log.error(f"⚠️ Erreur lors du chargement de Whisper sur {WHISPER_DEVICE}: {e}")
-            if WHISPER_DEVICE == "cuda":
-                log.warning("🔄 Fallback sur CPU pour Whisper...")
+            log.error(f"⚠️ STT : Erreur lors du chargement sur {WHISPER_DEVICE}: {e}")
+            if WHISPER_DEVICE != "cpu":
+                log.warning("🔄 STT : Tentative de fallback sur CPU...")
                 try:
                     self.model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
-                    log.info("✅ Whisper charge sur CPU.")
+                    log.info("✅ STT : Whisper charge sur CPU.")
                 except Exception as e2:
-                    log.critical(f"❌ Erreur critique : Impossible de charger Whisper sur CPU: {e2}")
+                    log.critical(f"❌ STT : Erreur critique (CPU Fallback echoue): {e2}")
                     raise e2
             else:
                 raise e

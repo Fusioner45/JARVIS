@@ -1,6 +1,7 @@
 import sys
 import asyncio
 import logging
+import torch
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QThread
 
@@ -36,7 +37,17 @@ class JarvisWorker(QThread):
             import traceback
             logging.error(traceback.format_exc())
 
+def diagnostic():
+    logging.info("--- DIAGNOSTIC MATERIEL ---")
+    cuda = torch.cuda.is_available()
+    logging.info(f"CUDA disponible : {cuda}")
+    if cuda:
+        logging.info(f"GPU : {torch.cuda.get_device_name(0)}")
+        logging.info(f"VRAM Totale : {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    logging.info("---------------------------")
+
 def main():
+    diagnostic()
     app = QApplication(sys.argv)
     logging.info("🚀 Lancement du HUD PyQt6...")
 
