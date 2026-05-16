@@ -18,7 +18,7 @@ if %errorlevel% neq 0 (
 
 :: 2. Venv Management
 if not exist ".venv" (
-    echo [JARVIS] Creation de l'environnement virtuel (.venv)...
+    echo [JARVIS] Creation de l'environnement virtuel ^(.venv^)...
     python -m venv .venv
 )
 
@@ -43,7 +43,7 @@ if %errorlevel% neq 0 (
     echo [INFO] Aucun GPU NVIDIA detecte. Installation mode CPU.
     set INSTALL_MODE=CPU
 ) else (
-    echo [OK] GPU NVIDIA detecte. Installation mode GPU (CUDA 12.1).
+    echo [OK] GPU NVIDIA detecte. Installation mode GPU ^(CUDA 12.1^).
     set INSTALL_MODE=GPU
 )
 
@@ -52,10 +52,10 @@ echo [JARVIS] Installation des dependances Core (requirements.txt)...
 !VENV_PYTHON! -m pip install -r requirements.txt
 
 if "!INSTALL_MODE!"=="GPU" (
-    echo [JARVIS] Installation de la stack AI (CUDA 12.1)...
+    echo [JARVIS] Installation de la stack AI ^(CUDA 12.1^)...
     !VENV_PYTHON! -m pip install -r requirements-gpu.txt --index-url https://download.pytorch.org/whl/cu121
 ) else (
-    echo [JARVIS] Installation de la stack AI (CPU)...
+    echo [JARVIS] Installation de la stack AI ^(CPU^)...
     !VENV_PYTHON! -m pip install torch==2.2.1+cpu torchvision==0.17.1+cpu torchaudio==2.2.1+cpu --index-url https://download.pytorch.org/whl/cpu
 )
 
@@ -63,7 +63,7 @@ if "!INSTALL_MODE!"=="GPU" (
 echo [JARVIS] Preparation des modeles...
 if not exist "models" mkdir models
 if not exist "models\silero_vad.onnx" (
-    echo [JARVIS] Telechargement de Silero VAD (ONNX)...
+    echo [JARVIS] Telechargement de Silero VAD ^(ONNX^)...
     powershell -Command "Invoke-WebRequest -Uri 'https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx' -OutFile 'models/silero_vad.onnx'"
 )
 
