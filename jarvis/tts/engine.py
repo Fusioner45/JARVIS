@@ -52,6 +52,11 @@ class TextToSpeech:
             pass
         except Exception as e:
             log.error(f"TTS Runtime Error: {e}")
+        finally:
+            # Atomic safety: If the queue is empty, we must ensure is_speaking is False
+            # so the microphone can resume.
+            if context.audio_output_queue.empty():
+                context.is_speaking = False
 
     async def _speak_ffmpeg(self, text: str, context: JarvisContext):
         """Streaming MP3 → ffmpeg → chunks PCM. Latence ~150–300ms."""
@@ -131,9 +136,13 @@ class TextToSpeech:
         loop = asyncio.get_running_loop()
 
         def _decode(data: bytes) -> np.ndarray:
-            seg = AudioSegment.from_file(io.BytesIO(data), format="mp3")
-            seg = seg.set_frame_rate(SAMPLE_RATE).set_channels(1).set_sample_width(2)
-            return np.frombuffer(seg.raw_data, dtype=np.int16)
+            try:
+                seg = AudioSegment.from_file(io.BytesIO(data), format="mp3")
+                seg = seg.set_frame_rate(SAMPLE_RATE).set_channels(1).set_sample_width(2)
+                return np.frombuffer(seg.raw_data, dtype=np.int16)
+            except Exception as e:
+                log.error(f"TTS Pydub Decode Error: {e}")
+                return None
 
         pcm = await loop.run_in_executor(None, _decode, bytes(mp3_buffer))
 

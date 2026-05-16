@@ -138,6 +138,11 @@ class Jarvis:
                 except Exception as e: log.error(f"PB Error: {e}")
 
         pb_task = asyncio.create_task(playback_manager(), name="playback_manager")
+
+        # UI Feedback: Notify that initialization is done
+        if self.signals:
+            self.signals.transcription_received.emit("SYSTÈMES EN LIGNE. EN ATTENTE...")
+
         self._run_bg("greeting", self.tts.speak(f"Bonjour {self.user_name}.", self.context))
 
         try:
