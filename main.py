@@ -1,6 +1,7 @@
 import sys
 import asyncio
 import logging
+import torch
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QThread
 
@@ -22,35 +23,57 @@ class JarvisWorker(QThread):
         self.signals = signals
 
     def run(self):
-        asyncio.run(self.run_async())
+        try:
+            asyncio.run(self.run_async())
+        except Exception as e:
+            logging.error(f"❌ Erreur critique asynchrone : {e}")
 
     async def run_async(self):
         try:
             self.jarvis = Jarvis(signals=self.signals)
             await self.jarvis.run()
         except Exception as e:
-            logging.error(f"Erreur dans le worker Jarvis : {e}")
+            logging.error(f"❌ Erreur fatale dans l'orchestrateur Jarvis : {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+
+def diagnostic():
+    logging.info("--- DIAGNOSTIC MATERIEL ---")
+    cuda = torch.cuda.is_available()
+    logging.info(f"CUDA disponible : {cuda}")
+    if cuda:
+        logging.info(f"GPU : {torch.cuda.get_device_name(0)}")
+        logging.info(f"VRAM Totale : {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    logging.info("---------------------------")
 
 def main():
+    diagnostic()
     app = QApplication(sys.argv)
-
-    reactor = ArcReactor()
-    screen = app.primaryScreen().availableGeometry()
-    reactor.move(screen.center().x() - reactor.width() // 2,
-                 screen.center().y() - reactor.height() // 2)
-    reactor.show()
-
-    signals = JarvisSignals()
-    signals.transcription_received.connect(reactor.set_text)
-    signals.thinking_state_changed.connect(reactor.set_thinking)
-
-    worker = JarvisWorker(signals)
-    worker.start()
+    logging.info("🚀 Lancement du HUD PyQt6...")
 
     try:
-        sys.exit(app.exec())
-    except KeyboardInterrupt:
-        pass
+        reactor = ArcReactor()
+        screen = app.primaryScreen().availableGeometry()
+        reactor.move(screen.center().x() - reactor.width() // 2,
+                     screen.center().y() - reactor.height() // 2)
+        reactor.show()
+
+        signals = JarvisSignals()
+        signals.transcription_received.connect(reactor.set_text)
+        signals.thinking_state_changed.connect(reactor.set_thinking)
+
+        logging.info("🧠 Initialisation du worker JARVIS...")
+        worker = JarvisWorker(signals)
+        worker.start()
+
+        exit_code = app.exec()
+        logging.info(f"🏁 L'application s'est terminee avec le code : {exit_code}")
+        sys.exit(exit_code)
+    except Exception as e:
+        logging.critical(f"💥 Crash de l'application : {e}")
+        import traceback
+        logging.critical(traceback.format_exc())
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
