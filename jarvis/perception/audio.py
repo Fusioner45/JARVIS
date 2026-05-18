@@ -66,8 +66,8 @@ def get_best_input_device():
             elif any(k in name for k in med_priority): kw_score = 50
             else: kw_score = 10
 
-            # Default Device Bonus
-            default_bonus = 50 if i == sd.default.device[0] else 0
+            # Default Device Bonus (Reduced to ensure API preference)
+            default_bonus = 15 if i == sd.default.device[0] else 0
 
             total_score = kw_score + api_score + default_bonus
 
@@ -202,7 +202,7 @@ class VoiceActivityDetector:
     def _reset_state(self):
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
 
-    def is_speech(self, frame: bytes, threshold: float = 0.20) -> bool:
+    def is_speech(self, frame: bytes, threshold: float = 0.10) -> bool:
         """Robust VAD with lower threshold for hands-free mics."""
         if not frame: return False
 
@@ -227,7 +227,7 @@ class VoiceActivityDetector:
             self._state = stateN
             confidence = out.item()
 
-            if confidence > 0.05:
+            if confidence > 0.01:
                 log.info(f"🔍 VAD: Conf={confidence:.3f}, RMS={rms:.5f}")
 
             if confidence > threshold:
