@@ -124,10 +124,12 @@ async def audio_frame_generator(context: JarvisContext):
 
                 # Diagnostic: Live Amplitude
                 amplitude = np.abs(mono).mean()
-                if amplitude > 0.005:
-                    log.debug(f"📊 Mic Amp: {amplitude:.4f} {'(MUTED)' if context.is_speaking else ''}")
+                if amplitude > 0.001:
+                    log.info(f"📊 Mic Amp: {amplitude:.4f} {'(MUTED)' if context.is_speaking else ''}")
 
                 if context.is_speaking:
+                    if amplitude > 0.001:
+                        log.info(f"🔇 Audio reçu mais bloqué (is_speaking=True)")
                     return
 
                 # Rééchantillonner au sample rate cible (16kHz) si nécessaire
@@ -200,7 +202,7 @@ class VoiceActivityDetector:
     def _reset_state(self):
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
 
-    def is_speech(self, frame: bytes, threshold: float = 0.35) -> bool:
+    def is_speech(self, frame: bytes, threshold: float = 0.20) -> bool:
         """Robust VAD with lower threshold for hands-free mics."""
         if not frame: return False
 
@@ -209,7 +211,7 @@ class VoiceActivityDetector:
             rms = np.sqrt(np.mean(audio_int16.astype(np.float32)**2)) / 32768.0
 
             # Lowered silence floor for low-gain headsets
-            if rms < 0.0005: return False
+            if rms < 0.00005: return False
 
             audio_float32 = audio_int16.astype(np.float32) / 32768.0
             if len(audio_float32) != FRAME_SIZE:
@@ -225,8 +227,8 @@ class VoiceActivityDetector:
             self._state = stateN
             confidence = out.item()
 
-            if confidence > 0.1:
-                log.debug(f"🔍 VAD: Conf={confidence:.3f}, RMS={rms:.5f}")
+            if confidence > 0.05:
+                log.info(f"🔍 VAD: Conf={confidence:.3f}, RMS={rms:.5f}")
 
             if confidence > threshold:
                 log.info(f"🗣️ Parole détectée ({confidence:.2f})")
