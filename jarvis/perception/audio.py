@@ -8,6 +8,27 @@ from jarvis.utils.config import SAMPLE_RATE, FRAME_SIZE
 from jarvis.utils.logger import audio_log as log
 from jarvis.core.context import JarvisContext
 
+# Ajout pour resampling natif → 16kHz
+try:
+    from scipy.signal import resample_poly
+    from math import gcd
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
+
+def _resample(mono: np.ndarray, from_sr: int, to_sr: int) -> np.ndarray:
+    """Resample mono float32 audio from from_sr to to_sr."""
+    if from_sr == to_sr:
+        return mono
+    if _HAS_SCIPY:
+        g = gcd(from_sr, to_sr)
+        return resample_poly(mono, to_sr // g, from_sr // g).astype(np.float32)
+    else:
+        # Fallback numpy : interpolation linéaire (qualité suffisante pour la voix)
+        target_len = int(len(mono) * to_sr / from_sr)
+        indices = np.linspace(0, len(mono) - 1, target_len)
+        return np.interp(indices, np.arange(len(mono)), mono).astype(np.float32)
+
 def get_best_input_device():
     """Identifies the best available microphone on Windows with a scoring system."""
     try:
@@ -60,7 +81,7 @@ def get_best_input_device():
             return best_idx
 
     except Exception as e:
-        log.error(f"Erreur lors de la sélection du micro : {e}")
+        log.error(f"Erreur lors de la détection du micro : {e}")
 
     return sd.default.device[0]
 
@@ -72,46 +93,64 @@ async def audio_frame_generator(context: JarvisContext):
     retry_count = 0
     max_retries = 10
     last_device_id = None
-
-    def callback(indata, frames, time_info, status):
-        if status:
-            log.warning(f"⚠️ Audio Status: {status}")
-
-        if not loop.is_running():
-            return
-
-        mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
-
-        # Diagnostic: Live Amplitude
-        amplitude = np.abs(mono).mean()
-        if amplitude > 0.005:
-            log.debug(f"📊 Mic Amp: {amplitude:.4f} {'(MUTED)' if context.is_speaking else ''}")
-
-        if context.is_speaking:
-            return
-
-        def _enqueue(data):
-            if q.full():
-                try: q.get_nowait()
-                except asyncio.QueueEmpty: pass
-            try: q.put_nowait(data)
-            except Exception: pass
-
-        pcm16 = (mono * 32767).astype(np.int16).tobytes()
-        loop.call_soon_threadsafe(_enqueue, pcm16)
+    frame = None
 
     while retry_count < max_retries:
         try:
             device_id = get_best_input_device()
             dev_info = sd.query_devices(device_id)
+            native_sr = int(dev_info['default_samplerate'])
 
-            log.info(f"🎙️ Démarrage flux (Device={device_id}, API={dev_info['hostapi']}, SR={SAMPLE_RATE}Hz, Latency={dev_info['default_low_input_latency']:.3f}s)")
+            # Calculer le blocksize natif équivalent à FRAME_SIZE frames à 16kHz
+            native_blocksize = int(FRAME_SIZE * native_sr / SAMPLE_RATE)
+
+            log.info(
+                f"🎙️ Démarrage flux ("
+                f"Device={device_id}, "
+                f"NativeSR={native_sr}Hz, "
+                f"TargetSR={SAMPLE_RATE}Hz, "
+                f"Blocksize={native_blocksize}, "
+                f"Latency={dev_info['default_low_input_latency']:.3f}s)"
+            )
+
+            def callback(indata, frames, time_info, status):
+                if status:
+                    log.warning(f"⚠️ Audio Status: {status}")
+
+                if not loop.is_running():
+                    return
+
+                mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
+
+                # Diagnostic: Live Amplitude
+                amplitude = np.abs(mono).mean()
+                if amplitude > 0.005:
+                    log.debug(f"📊 Mic Amp: {amplitude:.4f} {'(MUTED)' if context.is_speaking else ''}")
+
+                if context.is_speaking:
+                    return
+
+                # Rééchantillonner au sample rate cible (16kHz) si nécessaire
+                if native_sr != SAMPLE_RATE:
+                    processed_mono = _resample(mono, native_sr, SAMPLE_RATE)
+                else:
+                    processed_mono = mono
+
+                def _enqueue(data):
+                    if q.full():
+                        try: q.get_nowait()
+                        except asyncio.QueueEmpty: pass
+                    try: q.put_nowait(data)
+                    except Exception: pass
+
+                pcm16 = (processed_mono * 32767).astype(np.int16).tobytes()
+                loop.call_soon_threadsafe(_enqueue, pcm16)
 
             stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
+                samplerate=native_sr,
                 channels=1,
                 dtype="float32",
-                blocksize=FRAME_SIZE,
+                blocksize=native_blocksize,
                 callback=callback,
                 device=device_id
             )
