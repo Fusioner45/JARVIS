@@ -20,7 +20,7 @@ OLLAMA_MODEL = "llama3:8b"
 EDGE_TTS_VOICE = "fr-FR-HenriNeural"
 
 # Paths
-USER_PROFILE = os.environ.get('USERPROFILE', r'C:\Users\Fusion')
+USER_PROFILE = os.path.expanduser('~')
 DB_PATH = "memory.db"
 
 # Security

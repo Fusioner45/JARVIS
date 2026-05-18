@@ -46,9 +46,13 @@ class TextToSpeech:
             # First Attempt: Edge-TTS
             success = await self._try_edge_tts(text, context)
 
-            # Second Attempt: Fallback Google TTS (via pydub/io)
+            # Second Attempt: Piper (TODO)
             if not success and not context.stop_event.is_set():
-                log.warning("🔄 Edge-TTS a echoue. Tentative de fallback gTTS...")
+                success = await self._speak_piper(text, context)
+
+            # Final Attempt: Fallback Google TTS (via pydub/io)
+            if not success and not context.stop_event.is_set():
+                log.warning("🔄 Edge-TTS a échoué. Tentative de fallback gTTS...")
                 await self._speak_gtts(text, context)
 
         except asyncio.CancelledError:
@@ -81,6 +85,9 @@ class TextToSpeech:
         async def _feed_mp3():
             try:
                 async for chunk in communicate.stream():
+                    if context.stop_event.is_set():
+                        proc.kill()
+                        break
                     if chunk["type"] == "audio":
                         proc.stdin.write(chunk["data"])
                         await proc.stdin.drain()
@@ -95,6 +102,8 @@ class TextToSpeech:
 
         try:
             while True:
+                if context.stop_event.is_set():
+                    break
                 raw = await proc.stdout.read(_PCM_CHUNK_BYTES)
                 if not raw: break
                 has_audio = True
@@ -114,6 +123,8 @@ class TextToSpeech:
         communicate = edge_tts.Communicate(text, self.voice)
         mp3_buffer = bytearray()
         async for chunk in communicate.stream():
+            if context.stop_event.is_set():
+                return False
             if chunk["type"] == "audio":
                 mp3_buffer.extend(chunk["data"])
         if not mp3_buffer: return False
@@ -130,12 +141,22 @@ class TextToSpeech:
         if pcm is not None:
             chunk_size = SAMPLE_RATE * 2
             for i in range(0, len(pcm), chunk_size):
+                if context.stop_event.is_set():
+                    return True
                 await context.audio_output_queue.put(pcm[i:i + chunk_size])
             return True
         return False
 
+    async def _speak_piper(self, text: str, context: JarvisContext) -> bool:
+        """TODO: Implémenter Piper TTS pour une génération 100% locale."""
+        # log.info("Piper TTS n'est pas encore configuré.")
+        return False
+
     async def _speak_gtts(self, text: str, context: JarvisContext):
         """Robust fallback using gTTS."""
+        if context.stop_event.is_set():
+            return
+
         try:
             from gtts import gTTS
             from pydub import AudioSegment
@@ -143,6 +164,9 @@ class TextToSpeech:
             mp3_fp = io.BytesIO()
             tts.write_to_fp(mp3_fp)
             mp3_fp.seek(0)
+
+            if context.stop_event.is_set():
+                return
 
             loop = asyncio.get_running_loop()
             def _decode():
@@ -152,7 +176,9 @@ class TextToSpeech:
 
             pcm = await loop.run_in_executor(None, _decode)
             if pcm is not None:
+                if context.stop_event.is_set():
+                    return
                 await context.audio_output_queue.put(pcm)
-                log.info("✅ Fallback gTTS reussi.")
+                log.info("✅ Fallback gTTS réussi.")
         except Exception as e:
             log.error(f"Fallback gTTS Error: {e}")
