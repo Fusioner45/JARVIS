@@ -53,10 +53,10 @@ echo [JARVIS] Installation des dependances Core (requirements.txt)...
 
 if "!INSTALL_MODE!"=="GPU" (
     echo [JARVIS] Installation de la stack AI ^(CUDA 12.1^)...
-    !VENV_PYTHON! -m pip install -r requirements-gpu.txt --index-url https://download.pytorch.org/whl/cu121
+    !VENV_PYTHON! -m pip install -r requirements-gpu.txt --extra-index-url https://download.pytorch.org/whl/cu121
 ) else (
     echo [JARVIS] Installation de la stack AI ^(CPU^)...
-    !VENV_PYTHON! -m pip install torch==2.2.1+cpu torchvision==0.17.1+cpu torchaudio==2.2.1+cpu --index-url https://download.pytorch.org/whl/cpu
+    !VENV_PYTHON! -m pip install torch==2.2.1+cpu torchvision==0.17.1+cpu torchaudio==2.2.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
 )
 
 :: 6. Model Downloader Integration
