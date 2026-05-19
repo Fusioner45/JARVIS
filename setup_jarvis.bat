@@ -67,6 +67,16 @@ if not exist "models\silero_vad.onnx" (
     powershell -Command "Invoke-WebRequest -Uri 'https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx' -OutFile 'models/silero_vad.onnx'"
 )
 
+if not exist "models\kokoro-v1.0.onnx" (
+    echo [JARVIS] Telechargement de Kokoro ONNX...
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx' -OutFile 'models/kokoro-v1.0.onnx'"
+)
+
+if not exist "models\voices-v1.0.bin" (
+    echo [JARVIS] Telechargement des voix Kokoro...
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin' -OutFile 'models/voices-v1.0.bin'"
+)
+
 :: 7. Final Validation & Self-Repair
 echo [JARVIS] Validation finale de l'installation...
 !VENV_PYTHON! -c "import PyQt6; print('PyQt6 OK'); import torch; print('Torch OK')" >nul 2>&1
