@@ -68,12 +68,20 @@ if not exist "models\silero_vad.onnx" (
 )
 
 if not exist "models\kokoro-v1.0.onnx" (
-    echo [JARVIS] Telechargement de Kokoro ONNX...
+    echo [JARVIS] Telechargement de Kokoro ONNX (Direct)...
     powershell -Command "Invoke-WebRequest -Uri 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx' -OutFile 'models/kokoro-v1.0.onnx'"
 )
 
+:: Re-verification simple apres download
+powershell -Command "if ((Get-Item 'models/kokoro-v1.0.onnx').length -lt 100MB) { throw 'Download failed' }" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERREUR] Le telechargement a echoue ou le fichier est corrompu.
+    del "models\kokoro-v1.0.onnx"
+    pause
+)
+
 if not exist "models\voices-v1.0.bin" (
-    echo [JARVIS] Telechargement des voix Kokoro...
+    echo [JARVIS] Telechargement des voix Kokoro (Direct)...
     powershell -Command "Invoke-WebRequest -Uri 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin' -OutFile 'models/voices-v1.0.bin'"
 )
 
