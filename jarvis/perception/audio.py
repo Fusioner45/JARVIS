@@ -128,21 +128,20 @@ async def audio_frame_generator(context: JarvisContext):
                     log.info(f"📊 Mic Amp: {amplitude:.4f} {'(MUTED)' if context.is_speaking else ''}")
 
                 # --- AGC : Automatic Gain Control ---
-                # Normalise le signal au niveau cible (0.06 RMS) pour compenser
-                # les micros à faible gain (casques USB, headsets).
                 AGC_TARGET_RMS = 0.06
-                AGC_MAX_GAIN   = 25.0   # Plafond : évite d'amplifier le silence pur
+                AGC_MAX_GAIN   = 25.0
 
                 rms = np.sqrt(np.mean(mono ** 2))
-                if rms > 0.0001:                         # Ne booste pas le silence absolu
+                if rms > 0.0001:
                     gain = AGC_TARGET_RMS / rms
                     gain = min(gain, AGC_MAX_GAIN)
                     mono = np.clip(mono * gain, -1.0, 1.0)
 
                 # --- Barge-in Support ---
-                # On NE bloque PLUS le flux quand context.is_speaking est True.
-                # Cela permet au VAD de détecter l'utilisateur même si Jarvis parle.
-                # L'orchestrateur appellera trigger_stop() s'il détecte une parole.
+                if context.is_speaking:
+                    if amplitude > 0.001:
+                        log.info(f"🔇 Audio reçu mais bloqué (is_speaking=True)")
+                    return
 
                 # --- Resampling ---
                 if native_sr != SAMPLE_RATE:
@@ -173,15 +172,22 @@ async def audio_frame_generator(context: JarvisContext):
                 log.info("🎤 Microphone actif - En attente...")
                 retry_count = 0
                 last_device_id = device_id
+                last_system_default = sd.default.device[0]
+                last_hotplug_check = time.monotonic()
 
                 while True:
                     try:
-                        # Check if default device changed (hot-plug)
-                        if sd.default.device[0] != last_device_id:
-                            current_best = get_best_input_device()
-                            if current_best != last_device_id:
-                                log.info("🔄 Changement de périphérique détecté, redémarrage du flux...")
-                                break
+                        # Hot-plug : vérifier max toutes les 5 secondes
+                        now = time.monotonic()
+                        if now - last_hotplug_check > 5.0:
+                            last_hotplug_check = now
+                            current_system_default = sd.default.device[0]
+                            if current_system_default != last_system_default:
+                                last_system_default = current_system_default
+                                current_best = get_best_input_device()
+                                if current_best != last_device_id:
+                                    log.info("🔄 Changement de périphérique détecté, redémarrage...")
+                                    break
 
                         frame = await asyncio.wait_for(q.get(), timeout=1.0)
                         if frame is None: return # Global shutdown
@@ -210,11 +216,21 @@ class VoiceActivityDetector:
         opts.intra_op_num_threads = 1
         self.session = ort.InferenceSession(model_path, sess_options=opts, providers=['CPUExecutionProvider'])
         self._reset_state()
+        self._warmup()
 
     def _reset_state(self):
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
 
-    def is_speech(self, frame: bytes, threshold: float = 0.10) -> bool:
+    def _warmup(self):
+        """Passe 5 frames silencieuses pour initialiser l'état RNN."""
+        silence = np.zeros(FRAME_SIZE, dtype=np.float32)
+        silence_bytes = (silence * 32767).astype(np.int16).tobytes()
+        for _ in range(5):
+            self.is_speech(silence_bytes)
+        self._reset_state()
+        log.info("✅ VAD: Warmup RNN terminé.")
+
+    def is_speech(self, frame: bytes, threshold: float = 0.05) -> bool:
         """Robust VAD with lower threshold for hands-free mics."""
         if not frame: return False
 
@@ -239,8 +255,7 @@ class VoiceActivityDetector:
             self._state = stateN
             confidence = out.item()
 
-            if confidence > 0.01:
-                log.info(f"🔍 VAD: Conf={confidence:.3f}, RMS={rms:.5f}")
+            log.info(f"🔍 VAD: Conf={confidence:.3f}, RMS={rms:.5f}")
 
             if confidence > threshold:
                 log.info(f"🗣️ Parole détectée ({confidence:.2f})")
