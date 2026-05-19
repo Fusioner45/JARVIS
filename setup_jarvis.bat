@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal enabledelayedexpansion
 set PYTHONUTF8=1
 title JARVIS Unified Setup (V10)
