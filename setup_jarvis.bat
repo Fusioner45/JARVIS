@@ -18,7 +18,7 @@ if %errorlevel% neq 0 (
 
 :: 2. Venv Management
 if not exist ".venv" (
-    echo [JARVIS] Creation de l'environnement virtuel ^(.venv^)...
+    echo [JARVIS] Creation de l'environnement virtuel...
     python -m venv .venv
 )
 
@@ -43,7 +43,7 @@ if %errorlevel% neq 0 (
     echo [INFO] Aucun GPU NVIDIA detecte. Installation mode CPU.
     set INSTALL_MODE=CPU
 ) else (
-    echo [OK] GPU NVIDIA detecte. Installation mode GPU ^(CUDA 12.1^).
+    echo [OK] GPU NVIDIA detecte. Installation mode GPU CUDA 12.1.
     set INSTALL_MODE=GPU
 )
 
@@ -63,17 +63,17 @@ if "!INSTALL_MODE!"=="GPU" (
 echo [JARVIS] Preparation des modeles...
 if not exist "models" mkdir models
 if not exist "models\silero_vad.onnx" (
-    echo [JARVIS] Telechargement de Silero VAD ^(ONNX^)...
+    echo [JARVIS] Telechargement de Silero VAD ONNX...
     powershell -Command "Invoke-WebRequest -Uri 'https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx' -OutFile 'models/silero_vad.onnx'"
 )
 
 if not exist "models\kokoro-v1.0.onnx" (
-    echo [JARVIS] Telechargement de Kokoro ONNX (Direct)...
+    echo [JARVIS] Telechargement de Kokoro ONNX...
     powershell -Command "Invoke-WebRequest -Uri 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx' -OutFile 'models/kokoro-v1.0.onnx'"
 )
 
 :: Re-verification simple apres download
-powershell -Command "if ^(^(Get-Item 'models/kokoro-v1.0.onnx'^).length -lt 100MB^) { throw 'Download failed' }" >nul 2>&1
+powershell -Command "if ((Get-Item 'models/kokoro-v1.0.onnx').length -lt 100000000) { exit 1 } else { exit 0 }" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [ERREUR] Le telechargement a echoue ou le fichier est corrompu.
     del "models\kokoro-v1.0.onnx"
@@ -81,7 +81,7 @@ if %errorlevel% neq 0 (
 )
 
 if not exist "models\voices-v1.0.bin" (
-    echo [JARVIS] Telechargement des voix Kokoro (Direct)...
+    echo [JARVIS] Telechargement des voix Kokoro...
     powershell -Command "Invoke-WebRequest -Uri 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin' -OutFile 'models/voices-v1.0.bin'"
 )
 
