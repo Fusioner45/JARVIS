@@ -122,17 +122,30 @@ async def audio_frame_generator(context: JarvisContext):
 
                 mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
 
-                # Diagnostic: Live Amplitude
+                # --- Diagnostic: amplitude brute ---
                 amplitude = np.abs(mono).mean()
                 if amplitude > 0.001:
                     log.info(f"📊 Mic Amp: {amplitude:.4f} {'(MUTED)' if context.is_speaking else ''}")
 
+                # --- AGC : Automatic Gain Control ---
+                # Normalise le signal au niveau cible (0.06 RMS) pour compenser
+                # les micros à faible gain (casques USB, headsets).
+                AGC_TARGET_RMS = 0.06
+                AGC_MAX_GAIN   = 25.0   # Plafond : évite d'amplifier le silence pur
+
+                rms = np.sqrt(np.mean(mono ** 2))
+                if rms > 0.0001:                         # Ne booste pas le silence absolu
+                    gain = AGC_TARGET_RMS / rms
+                    gain = min(gain, AGC_MAX_GAIN)
+                    mono = np.clip(mono * gain, -1.0, 1.0)
+
+                # --- Bloc is_speaking ---
                 if context.is_speaking:
                     if amplitude > 0.001:
                         log.info(f"🔇 Audio reçu mais bloqué (is_speaking=True)")
                     return
 
-                # Rééchantillonner au sample rate cible (16kHz) si nécessaire
+                # --- Resampling ---
                 if native_sr != SAMPLE_RATE:
                     processed_mono = _resample(mono, native_sr, SAMPLE_RATE)
                 else:
@@ -202,7 +215,7 @@ class VoiceActivityDetector:
     def _reset_state(self):
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
 
-    def is_speech(self, frame: bytes, threshold: float = 0.10) -> bool:
+    def is_speech(self, frame: bytes, threshold: float = 0.05) -> bool:
         """Robust VAD with lower threshold for hands-free mics."""
         if not frame: return False
 
@@ -227,8 +240,8 @@ class VoiceActivityDetector:
             self._state = stateN
             confidence = out.item()
 
-            if confidence > 0.01:
-                log.info(f"🔍 VAD: Conf={confidence:.3f}, RMS={rms:.5f}")
+            # log TOUT (même confidence=0.000) pour diagnostic
+            log.info(f"🔍 VAD: Conf={confidence:.3f}, RMS={rms:.5f}")
 
             if confidence > threshold:
                 log.info(f"🗣️ Parole détectée ({confidence:.2f})")
