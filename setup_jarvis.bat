@@ -73,7 +73,7 @@ if not exist "models\kokoro-v1.0.onnx" (
 )
 
 :: Re-verification simple apres download
-powershell -Command "if ((Get-Item 'models/kokoro-v1.0.onnx').length -lt 100MB) { throw 'Download failed' }" >nul 2>&1
+powershell -Command "if ^(^(Get-Item 'models/kokoro-v1.0.onnx'^).length -lt 100MB^) { throw 'Download failed' }" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [ERREUR] Le telechargement a echoue ou le fichier est corrompu.
     del "models\kokoro-v1.0.onnx"
