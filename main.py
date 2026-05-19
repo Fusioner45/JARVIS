@@ -5,6 +5,9 @@ import torch
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QThread
 
+import os
+os.environ["PYTHONUTF8"] = "1"
+
 from dotenv import load_dotenv
 from jarvis.core.orchestrator import Jarvis
 from jarvis.ui.hud import ArcReactor, JarvisSignals

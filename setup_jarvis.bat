@@ -1,5 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
+set PYTHONUTF8=1
 title JARVIS Unified Setup (V10)
 
 echo.
