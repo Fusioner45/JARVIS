@@ -2,16 +2,13 @@
 aiohttp==3.9.1
 python-dotenv==1.0.1
 numpy==1.26.4
-onnxruntime==1.17.0
+onnxruntime>=1.20.1
 psutil==5.9.8
 faster-whisper==1.0.3
-pvporcupine==3.0.0
-pvrecorder==1.2.1
 sounddevice==0.4.6
 soundfile==0.12.1
 pydub==0.25.1
-edge-tts==6.1.12
-gTTS==2.5.1
+kokoro-onnx==0.3.0
 pypdf==4.0.1
 PyQt6==6.6.1
 PyQt6-Qt6==6.6.1
@@ -19,3 +16,4 @@ pyautogui==0.9.54
 pygetwindow==0.0.9
 pycaw==20230407
 comtypes==1.4.1
+scipy==1.12.0

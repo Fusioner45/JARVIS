@@ -117,10 +117,19 @@ class Jarvis:
         stream.start()
 
         async def playback_manager():
+            last_activity = time.perf_counter()
             while self._running:
                 try:
+                    # Watchdog: force reset is_speaking if stuck for > 5s without audio
+                    if self.context.is_speaking and (time.perf_counter() - last_activity > 5.0) and self.context.audio_output_queue.empty():
+                        log.warning("⚠️ Watchdog: is_speaking était bloqué. Reset forcé.")
+                        self.context.is_speaking = False
+
                     pcm_phrase = await asyncio.wait_for(self.context.audio_output_queue.get(), timeout=1.0)
                     if pcm_phrase is None: break
+
+                    self.context.is_speaking = True
+                    last_activity = time.perf_counter()
 
                     for i in range(0, len(pcm_phrase), FRAME_SIZE):
                         if self.context.stop_event.is_set(): break
@@ -133,8 +142,16 @@ class Jarvis:
                         except queue.Full: continue
 
                     self.context.audio_output_queue.task_done()
-                    if self.context.audio_output_queue.empty(): self.context.is_speaking = False
-                except (asyncio.TimeoutError, asyncio.CancelledError): continue
+
+                    if self.context.audio_output_queue.empty():
+                        await asyncio.sleep(0.15) # Grace period
+                        if self.context.audio_output_queue.empty():
+                            self.context.is_speaking = False
+
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    if self.context.audio_output_queue.empty():
+                        self.context.is_speaking = False
+                    continue
                 except Exception as e: log.error(f"PB Error: {e}")
 
         pb_task = asyncio.create_task(playback_manager(), name="playback_manager")
@@ -146,7 +163,8 @@ class Jarvis:
         self._run_bg("greeting", self.tts.speak(f"Bonjour {self.user_name}.", self.context))
 
         try:
-            async for text in self._audio_listener():
+            listener = self._audio_listener()
+            async for text in listener:
                 self.context.reset_stop_event()
                 if self._resp_task and not self._resp_task.done():
                     self._resp_task.cancel()

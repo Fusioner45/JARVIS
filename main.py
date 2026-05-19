@@ -5,6 +5,23 @@ import torch
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QThread
 
+import os
+import sys
+import builtins
+
+# Force UTF-8 globally on Windows to resolve 'charmap' codec errors
+os.environ["PYTHONUTF8"] = "1"
+
+# Monkey-patch open() to default to utf-8 if encoding is not specified
+_original_open = builtins.open
+def _utf8_open(*args, **kwargs):
+    if len(args) > 1 and 'b' in args[1]:
+        return _original_open(*args, **kwargs)
+    if 'encoding' not in kwargs:
+        kwargs['encoding'] = 'utf-8'
+    return _original_open(*args, **kwargs)
+builtins.open = _utf8_open
+
 from dotenv import load_dotenv
 from jarvis.core.orchestrator import Jarvis
 from jarvis.ui.hud import ArcReactor, JarvisSignals
