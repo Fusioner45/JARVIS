@@ -55,13 +55,19 @@ class TextToSpeech:
                 log.warning("🔄 Edge-TTS a échoué. Tentative de fallback gTTS...")
                 await self._speak_gtts(text, context)
 
+            if not success:
+                log.error("❌ Tous les services TTS ont échoué.")
+                context.is_speaking = False
+
         except asyncio.CancelledError:
-            pass
+            context.is_speaking = False
         except Exception as e:
             log.error(f"TTS Runtime Error: {e}")
+            context.is_speaking = False
         finally:
-            if context.audio_output_queue.empty():
-                context.is_speaking = False
+            # Note: is_speaking is also reset in orchestrator's playback_manager
+            # when audio_output_queue is empty.
+            pass
 
     async def _try_edge_tts(self, text: str, context: JarvisContext) -> bool:
         try:
@@ -149,13 +155,12 @@ class TextToSpeech:
 
     async def _speak_piper(self, text: str, context: JarvisContext) -> bool:
         """TODO: Implémenter Piper TTS pour une génération 100% locale."""
-        # log.info("Piper TTS n'est pas encore configuré.")
         return False
 
-    async def _speak_gtts(self, text: str, context: JarvisContext):
+    async def _speak_gtts(self, text: str, context: JarvisContext) -> bool:
         """Robust fallback using gTTS."""
         if context.stop_event.is_set():
-            return
+            return False
 
         try:
             from gtts import gTTS
@@ -166,7 +171,7 @@ class TextToSpeech:
             mp3_fp.seek(0)
 
             if context.stop_event.is_set():
-                return
+                return False
 
             loop = asyncio.get_running_loop()
             def _decode():
@@ -177,8 +182,11 @@ class TextToSpeech:
             pcm = await loop.run_in_executor(None, _decode)
             if pcm is not None:
                 if context.stop_event.is_set():
-                    return
+                    return True
                 await context.audio_output_queue.put(pcm)
                 log.info("✅ Fallback gTTS réussi.")
+                return True
+            return False
         except Exception as e:
             log.error(f"Fallback gTTS Error: {e}")
+            return False
