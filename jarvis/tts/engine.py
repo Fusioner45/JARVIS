@@ -1,6 +1,9 @@
 import os
 import asyncio
 import numpy as np
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
 from kokoro_onnx import Kokoro
 from jarvis.utils.config import KOKORO_VOICE, KOKORO_MODEL_PATH, KOKORO_VOICES_PATH, SAMPLE_RATE
 from jarvis.utils.logger import audio_log as log
@@ -19,8 +22,11 @@ class TextToSpeech:
             return
 
         try:
+            # Convert to absolute paths (prevents Windows cp1252 encoding errors during model load)
+            model_abs = os.path.abspath(KOKORO_MODEL_PATH)
+            voices_abs = os.path.abspath(KOKORO_VOICES_PATH)
             # Automatic Device Detection (onnxruntime-gpu handles this if installed)
-            self.kokoro = Kokoro(KOKORO_MODEL_PATH, KOKORO_VOICES_PATH)
+            self.kokoro = Kokoro(model_abs, voices_abs)
             log.info("✅ Kokoro TTS: Modèle chargé avec succès.")
             self.available = True
         except Exception as e:

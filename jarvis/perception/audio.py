@@ -128,9 +128,10 @@ async def audio_frame_generator(context: JarvisContext):
                     log.info(f"📊 Mic Amp: {amplitude:.4f} {'(MUTED)' if context.is_speaking else ''}")
 
                 # --- AGC : Automatic Gain Control ---
-                # Normalise le signal au niveau cible (0.06 RMS) pour compenser
-                # les micros à faible gain (casques USB, headsets).
-                AGC_TARGET_RMS = 0.06
+                # Normalise le signal au niveau cible (0.15 RMS) pour compenser
+                # les micros à faible gain (casques USB, headsets) et assurer détection VAD.
+                # 0.06 RMS était trop bas → VAD non détecte la parole normale.
+                AGC_TARGET_RMS = 0.15
                 AGC_MAX_GAIN   = 25.0   # Plafond : évite d'amplifier le silence pur
 
                 rms = np.sqrt(np.mean(mono ** 2))
@@ -157,7 +158,8 @@ async def audio_frame_generator(context: JarvisContext):
                     try: q.put_nowait(data)
                     except Exception: pass
 
-                pcm16 = (processed_mono * 32767).astype(np.int16).tobytes()
+                # Convert float32 [-1, 1] to int16 with symmetric scaling (consistent encoding/decoding)
+                pcm16 = (np.clip(processed_mono, -1.0, 1.0) * 32768).astype(np.int16).tobytes()
                 loop.call_soon_threadsafe(_enqueue, pcm16)
 
             stream = sd.InputStream(
@@ -214,18 +216,18 @@ class VoiceActivityDetector:
     def _reset_state(self):
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
 
-    def is_speech(self, frame: bytes, threshold: float = 0.10) -> bool:
-        """Robust VAD with lower threshold for hands-free mics."""
+    def is_speech(self, frame: bytes, threshold: float = 0.05) -> bool:
+        """VAD with optimized threshold for normal speech (AGC now targets 0.15 RMS)."""
         if not frame: return False
 
         try:
             audio_int16 = np.frombuffer(frame, dtype=np.int16)
             rms = np.sqrt(np.mean(audio_int16.astype(np.float32)**2)) / 32768.0
 
-            # Lowered silence floor for low-gain headsets
-            if rms < 0.00005: return False
+            # Silence floor: ignore pure noise/silence
+            if rms < 0.0001: return False
 
-            audio_float32 = audio_int16.astype(np.float32) / 32768.0
+            audio_float32 = np.clip(audio_int16.astype(np.float32) / 32768.0, -1.0, 1.0)
             if len(audio_float32) != FRAME_SIZE:
                 audio_float32 = np.pad(audio_float32, (0, FRAME_SIZE - len(audio_float32)))
 

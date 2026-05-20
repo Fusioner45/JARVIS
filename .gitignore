@@ -5,3 +5,38 @@ __pycache__/
 .env
 .vscode/
 ffmpeg/
+# === Environnement Virtuel Python ===
+.venv/
+venv/
+ENV/
+pyvenv.cfg
+
+# === Cache Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# === Modèles d'IA (Trop lourds pour GitHub) ===
+*.onnx
+*.bin
+models/
+jarvis/perception/models/
+jarvis/tts/models/
+
+# === Logs et Diagnostics ===
+logs/
+*.log
+
+# === Fichiers de Configuration et Secrets ===
+.env
+config_perso.json
+credentials.json
+secrets.py
+
+# === Fichiers Système et IDE ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
