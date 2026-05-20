@@ -54,7 +54,7 @@ class LlmClient:
                     try:
                         data = json.loads(data_content)
                         token = data["choices"][0]["delta"].get("content", "")
-                        if token:
+                        if token and token.strip(): # Skip empty tokens/whitespace-only tokens at the beginning if needed, but here we just ensure no empty strings
                             if first_token:
                                 log.info(f"🚀 LLM TTFT: {(time.perf_counter()-start_time)*1000:.2f}ms")
                                 first_token = False

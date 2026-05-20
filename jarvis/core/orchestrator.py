@@ -104,6 +104,15 @@ class Jarvis:
 
     async def run(self):
         log.info(f"🚀 JARVIS V8.1 Hardened Runtime.")
+
+        # Safety: Clear queues before start
+        while not self.context.audio_output_queue.empty():
+            try: self.context.audio_output_queue.get_nowait(); self.context.audio_output_queue.task_done()
+            except: break
+        while not self.context.playback_sync_queue.empty():
+            try: self.context.playback_sync_queue.get_nowait()
+            except: break
+
         self._running = True
         self._run_bg("supervisor", self.supervisor.start())
 
