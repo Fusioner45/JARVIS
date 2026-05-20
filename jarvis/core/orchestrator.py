@@ -104,6 +104,15 @@ class Jarvis:
 
     async def run(self):
         log.info(f"🚀 JARVIS V8.1 Hardened Runtime.")
+
+        # Safety: Clear queues before start
+        while not self.context.audio_output_queue.empty():
+            try: self.context.audio_output_queue.get_nowait(); self.context.audio_output_queue.task_done()
+            except: break
+        while not self.context.playback_sync_queue.empty():
+            try: self.context.playback_sync_queue.get_nowait()
+            except: break
+
         self._running = True
         self._run_bg("supervisor", self.supervisor.start())
 
@@ -138,8 +147,11 @@ class Jarvis:
                             chunk = np.concatenate([chunk, np.zeros(FRAME_SIZE-len(chunk), dtype=np.int16)])
 
                         try:
-                            self.context.playback_sync_queue.put(chunk, timeout=0.1)
-                        except queue.Full: continue
+                            # Increase timeout and don't silently drop chunks
+                            self.context.playback_sync_queue.put(chunk, timeout=0.5)
+                        except queue.Full:
+                            log.warning("⚠️ Playback queue full, chunk dropped after timeout.")
+                            continue
 
                     self.context.audio_output_queue.task_done()
 

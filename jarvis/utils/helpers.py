@@ -1,7 +1,6 @@
 import logging
 import subprocess
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-from comtypes import CLSCTX_ALL
+import os
 
 log = logging.getLogger("Jarvis.Utils")
 
@@ -9,8 +8,14 @@ class AudioController:
     """Async-ready Audio Controller for Windows (Phase 8)."""
 
     def __init__(self):
+        self.volume = None
+        if os.name != 'nt':
+            return
+
         from ctypes import cast, POINTER
         try:
+            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+            from comtypes import CLSCTX_ALL
             devices = AudioUtilities.GetSpeakers()
             self.interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
             self.volume = cast(self.interface, POINTER(IAudioEndpointVolume))

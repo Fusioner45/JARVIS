@@ -1,5 +1,4 @@
 import os
-import winreg
 import shutil
 from typing import Dict, Optional
 from jarvis.utils.logger import action_log as log
@@ -41,6 +40,14 @@ class AppResolver:
     @staticmethod
     def _search_registry(name: str) -> Optional[str]:
         """Looks up executable path in Windows Registry."""
+        if os.name != 'nt':
+            return None
+
+        try:
+            import winreg
+        except ImportError:
+            return None
+
         # Simple suffix addition for common apps
         search_names = [name, f"{name}.exe"]
         keys = [

@@ -120,7 +120,9 @@ class TextToSpeech:
 
     def _generate(self, text):
         try:
-            return self.kokoro.create(text, voice=KOKORO_VOICE, speed=1.0, lang="en-us")
+            # Automatic language selection based on voice prefix
+            lang = "fr-fr" if KOKORO_VOICE.startswith("ff_") else "en-us"
+            return self.kokoro.create(text, voice=KOKORO_VOICE, speed=1.0, lang=lang)
         except Exception as e:
             log.error(f"Kokoro Generation Error: {e}")
             return None, None

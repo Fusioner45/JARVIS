@@ -123,9 +123,9 @@ async def audio_frame_generator(context: JarvisContext):
                 mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
 
                 # --- Diagnostic: amplitude brute ---
-                amplitude = np.abs(mono).mean()
-                if amplitude > 0.001:
-                    log.info(f"📊 Mic Amp: {amplitude:.4f} {'(MUTED)' if context.is_speaking else ''}")
+                # amplitude = np.abs(mono).mean()
+                # if amplitude > 0.001:
+                #    log.info(f"📊 Mic Amp: {amplitude:.4f} {'(MUTED)' if context.is_speaking else ''}")
 
                 # --- AGC : Automatic Gain Control ---
                 # Normalise le signal au niveau cible (0.15 RMS) pour compenser

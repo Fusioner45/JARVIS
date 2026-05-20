@@ -3,7 +3,6 @@ import webbrowser
 import threading
 import time
 import pyautogui
-import pygetwindow as gw
 from typing import List, Callable, Dict, Any
 from jarvis.actions.apps import AppResolver
 from jarvis.utils.logger import action_log as log
@@ -69,6 +68,7 @@ class ActionRegistry:
 
     def _split_screen(self, app1: str, app2: str) -> str:
         try:
+            import pygetwindow as gw
             windows = gw.getAllWindows()
             w1 = [w for w in windows if app1.lower() in w.title.lower()]
             w2 = [w for w in windows if app2.lower() in w.title.lower()]
