@@ -138,8 +138,11 @@ class Jarvis:
                             chunk = np.concatenate([chunk, np.zeros(FRAME_SIZE-len(chunk), dtype=np.int16)])
 
                         try:
-                            self.context.playback_sync_queue.put(chunk, timeout=0.1)
-                        except queue.Full: continue
+                            # Increase timeout and don't silently drop chunks
+                            self.context.playback_sync_queue.put(chunk, timeout=0.5)
+                        except queue.Full:
+                            log.warning("⚠️ Playback queue full, chunk dropped after timeout.")
+                            continue
 
                     self.context.audio_output_queue.task_done()
 

@@ -17,7 +17,7 @@ OLLAMA_HOST = "http://localhost:11434"
 OLLAMA_MODEL = "llama3:8b"
 
 # TTS Settings
-KOKORO_VOICE = "af_sky" # Default high quality voice
+KOKORO_VOICE = "ff_siwis" # French voice
 KOKORO_MODEL_PATH = "models/kokoro-v1.0.onnx"
 KOKORO_VOICES_PATH = "models/voices-v1.0.bin"
 
