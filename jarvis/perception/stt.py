@@ -46,9 +46,11 @@ class SpeechToText:
                 segments, _ = self.model.transcribe(
                     audio_np,
                     language=language,
-                    beam_size=5,
-                    best_of=5,
-                    initial_prompt="Ceci est une conversation en français uniquement. Pas de traduction.",
+                    beam_size=1,
+                    best_of=1,
+                    temperature=0.0,
+                    condition_on_previous_text=False,
+                    initial_prompt="Ceci est une conversation en français.",
                     suppress_tokens=[-1]
                 )
                 text = " ".join(seg.text for seg in segments).strip()

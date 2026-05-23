@@ -4,7 +4,9 @@ import sounddevice as sd
 import onnxruntime as ort
 import os
 import time
-from jarvis.utils.config import SAMPLE_RATE, FRAME_SIZE
+import queue
+import threading
+from jarvis.utils.config import SAMPLE_RATE, FRAME_SIZE, VAD_THRESHOLD, AGC_TARGET_RMS, AGC_MAX_GAIN
 from jarvis.utils.logger import audio_log as log
 from jarvis.core.context import JarvisContext
 
@@ -21,13 +23,16 @@ def _resample(mono: np.ndarray, from_sr: int, to_sr: int) -> np.ndarray:
     if from_sr == to_sr:
         return mono
     if _HAS_SCIPY:
-        g = gcd(from_sr, to_sr)
-        return resample_poly(mono, to_sr // g, from_sr // g).astype(np.float32)
-    else:
-        # Fallback numpy : interpolation linéaire (qualité suffisante pour la voix)
-        target_len = int(len(mono) * to_sr / from_sr)
-        indices = np.linspace(0, len(mono) - 1, target_len)
-        return np.interp(indices, np.arange(len(mono)), mono).astype(np.float32)
+        try:
+            g = gcd(from_sr, to_sr)
+            return resample_poly(mono, to_sr // g, from_sr // g).astype(np.float32)
+        except Exception as e:
+            log.error(f"Resampling error with scipy: {e}")
+
+    # Fallback numpy : interpolation linéaire (qualité suffisante pour la voix)
+    target_len = int(len(mono) * to_sr / from_sr)
+    indices = np.linspace(0, len(mono) - 1, target_len)
+    return np.interp(indices, np.arange(len(mono)), mono).astype(np.float32)
 
 def get_best_input_device():
     """Identifies the best available microphone on Windows with a scoring system."""
@@ -86,81 +91,91 @@ def get_best_input_device():
     return sd.default.device[0]
 
 async def audio_frame_generator(context: JarvisContext):
-    """Captures microphone audio and yields PCM frames. Robust against disconnection."""
+    """Captures microphone audio and yields PCM frames. Stabilized version."""
     loop = asyncio.get_running_loop()
-    q = asyncio.Queue(maxsize=1000)
+    raw_q = queue.Queue(maxsize=200)
+    proc_q = asyncio.Queue(maxsize=200)
+
+    running = True
+
+    def audio_worker():
+        """Dedicated thread for audio processing (AGC, Resampling)."""
+        nonlocal running
+        smoothed_gain = 1.0
+
+        while running:
+            try:
+                data_dict = raw_q.get(timeout=0.5)
+                if data_dict is None: break
+
+                mono = data_dict['data']
+                native_sr = data_dict['sr']
+
+                # 1. AGC (Slow/Smoothed)
+                rms = np.sqrt(np.mean(mono ** 2))
+                if rms > 0.001:
+                    target_gain = AGC_TARGET_RMS / rms
+                    target_gain = min(target_gain, AGC_MAX_GAIN)
+                    # Smooth gain transition (approx 0.1s time constant)
+                    smoothed_gain = 0.95 * smoothed_gain + 0.05 * target_gain
+                else:
+                    # Slowly return to unity gain during silence
+                    smoothed_gain = 0.99 * smoothed_gain + 0.01 * 1.0
+
+                mono = mono * smoothed_gain
+
+                # 2. Resampling
+                if native_sr != SAMPLE_RATE:
+                    mono = _resample(mono, native_sr, SAMPLE_RATE)
+
+                # 3. Safe PCM16 Conversion with Clipping
+                # Ensure float32 is in range [-1, 1] before conversion
+                mono_clipped = np.clip(mono, -1.0, 1.0)
+                pcm16 = (mono_clipped * 32767).astype(np.int16).tobytes()
+
+                # 4. Push to asyncio queue
+                def _enqueue(d):
+                    if proc_q.full():
+                        try: proc_q.get_nowait()
+                        except asyncio.QueueEmpty: pass
+                    try: proc_q.put_nowait(d)
+                    except Exception: pass
+
+                loop.call_soon_threadsafe(_enqueue, pcm16)
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                log.error(f"Audio Worker Error: {e}")
+
+    worker_thread = threading.Thread(target=audio_worker, daemon=True)
+    worker_thread.start()
 
     retry_count = 0
     max_retries = 10
     last_device_id = None
-    frame = None
 
-    while retry_count < max_retries:
+    try:
+      while retry_count < max_retries:
         try:
             device_id = get_best_input_device()
             dev_info = sd.query_devices(device_id)
             native_sr = int(dev_info['default_samplerate'])
-
-            # Calculer le blocksize natif équivalent à FRAME_SIZE frames à 16kHz
             native_blocksize = int(FRAME_SIZE * native_sr / SAMPLE_RATE)
 
-            log.info(
-                f"🎙️ Démarrage flux ("
-                f"Device={device_id}, "
-                f"NativeSR={native_sr}Hz, "
-                f"TargetSR={SAMPLE_RATE}Hz, "
-                f"Blocksize={native_blocksize}, "
-                f"Latency={dev_info['default_low_input_latency']:.3f}s)"
-            )
+            log.info(f"🎙️ Audio Stream: {dev_info['name']} | Native SR: {native_sr}Hz")
 
             def callback(indata, frames, time_info, status):
                 if status:
-                    log.warning(f"⚠️ Audio Status: {status}")
+                    # Minimal logging in callback
+                    pass
 
-                if not loop.is_running():
-                    return
-
+                # Lightweight capture
                 mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
-
-                # --- Diagnostic: amplitude brute ---
-                amplitude = np.abs(mono).mean()
-                if amplitude > 0.001:
-                    log.info(f"📊 Mic Amp: {amplitude:.4f} {'(MUTED)' if context.is_speaking else ''}")
-
-                # --- AGC : Automatic Gain Control ---
-                # Normalise le signal au niveau cible (0.15 RMS) pour compenser
-                # les micros à faible gain (casques USB, headsets) et assurer détection VAD.
-                # 0.06 RMS était trop bas → VAD non détecte la parole normale.
-                AGC_TARGET_RMS = 0.15
-                AGC_MAX_GAIN   = 25.0   # Plafond : évite d'amplifier le silence pur
-
-                rms = np.sqrt(np.mean(mono ** 2))
-                if rms > 0.0001:                         # Ne booste pas le silence absolu
-                    gain = AGC_TARGET_RMS / rms
-                    gain = min(gain, AGC_MAX_GAIN)
-                    mono = np.clip(mono * gain, -1.0, 1.0)
-
-                # --- Barge-in Support ---
-                # On NE bloque PLUS le flux quand context.is_speaking est True.
-                # Cela permet au VAD de détecter l'utilisateur même si Jarvis parle.
-                # L'orchestrateur appellera trigger_stop() s'il détecte une parole.
-
-                # --- Resampling ---
-                if native_sr != SAMPLE_RATE:
-                    processed_mono = _resample(mono, native_sr, SAMPLE_RATE)
-                else:
-                    processed_mono = mono
-
-                def _enqueue(data):
-                    if q.full():
-                        try: q.get_nowait()
-                        except asyncio.QueueEmpty: pass
-                    try: q.put_nowait(data)
-                    except Exception: pass
-
-                # Convert float32 [-1, 1] to int16 with symmetric scaling (consistent encoding/decoding)
-                pcm16 = (np.clip(processed_mono, -1.0, 1.0) * 32768).astype(np.int16).tobytes()
-                loop.call_soon_threadsafe(_enqueue, pcm16)
+                try:
+                    raw_q.put_nowait({'data': mono, 'sr': native_sr})
+                except queue.Full:
+                    pass
 
             stream = sd.InputStream(
                 samplerate=native_sr,
@@ -172,34 +187,35 @@ async def audio_frame_generator(context: JarvisContext):
             )
 
             with stream:
-                log.info("🎤 Microphone actif - En attente...")
                 retry_count = 0
                 last_device_id = device_id
 
                 while True:
-                    try:
-                        # Check if default device changed (hot-plug)
-                        if sd.default.device[0] != last_device_id:
-                            current_best = get_best_input_device()
-                            if current_best != last_device_id:
-                                log.info("🔄 Changement de périphérique détecté, redémarrage du flux...")
-                                break
+                    if sd.default.device[0] != last_device_id:
+                        current_best = get_best_input_device()
+                        if current_best != last_device_id:
+                            log.info("🔄 Audio device change detected.")
+                            break
 
-                        frame = await asyncio.wait_for(q.get(), timeout=1.0)
-                        if frame is None: return # Global shutdown
+                    try:
+                        frame = await asyncio.wait_for(proc_q.get(), timeout=1.0)
+                        if frame is None:
+                            running = False
+                            raw_q.put(None)
+                            return
                         yield frame
                     except asyncio.TimeoutError:
-                        if not stream.active:
-                            log.error("❌ Flux audio inactif.")
-                            break
+                        if not stream.active: break
                         continue
 
         except Exception as e:
             retry_count += 1
-            log.error(f"⚠️ Erreur audio (retry {retry_count}/{max_retries}): {e}")
-            await asyncio.sleep(3)
-
-    log.critical("💀 Système audio KO après multiples tentatives.")
+            log.error(f"⚠️ Audio Error (retry {retry_count}): {e}")
+            await asyncio.sleep(2)
+    finally:
+        running = False
+        raw_q.put(None)
+        log.info("🎤 Audio capture stopped.")
 
 class VoiceActivityDetector:
     def __init__(self, model_path: str = "models/silero_vad.onnx"):
@@ -216,18 +232,19 @@ class VoiceActivityDetector:
     def _reset_state(self):
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
 
-    def is_speech(self, frame: bytes, threshold: float = 0.05) -> bool:
-        """VAD with optimized threshold for normal speech (AGC now targets 0.15 RMS)."""
+    def is_speech(self, frame: bytes, threshold: float = VAD_THRESHOLD, context: JarvisContext = None) -> bool:
+        """VAD with optimized threshold and barge-in protection."""
         if not frame: return False
+
+        # Disable VAD while Jarvis is speaking (No barge-in for stability)
+        if context and context.is_speaking:
+            return False
 
         try:
             audio_int16 = np.frombuffer(frame, dtype=np.int16)
-            rms = np.sqrt(np.mean(audio_int16.astype(np.float32)**2)) / 32768.0
+            # Safe conversion back to float for VAD
+            audio_float32 = audio_int16.astype(np.float32) / 32768.0
 
-            # Silence floor: ignore pure noise/silence
-            if rms < 0.0001: return False
-
-            audio_float32 = np.clip(audio_int16.astype(np.float32) / 32768.0, -1.0, 1.0)
             if len(audio_float32) != FRAME_SIZE:
                 audio_float32 = np.pad(audio_float32, (0, FRAME_SIZE - len(audio_float32)))
 
@@ -241,11 +258,8 @@ class VoiceActivityDetector:
             self._state = stateN
             confidence = out.item()
 
-            if confidence > 0.01:
-                log.info(f"🔍 VAD: Conf={confidence:.3f}, RMS={rms:.5f}")
-
             if confidence > threshold:
-                log.info(f"🗣️ Parole détectée ({confidence:.2f})")
+                log.info(f"🗣️ Speech detected (Conf: {confidence:.2f})")
                 return True
 
             return False
