@@ -66,7 +66,7 @@ class Jarvis:
     async def _audio_listener(self):
         async for frame in audio_frame_generator(self.context):
             if not self._running: break
-            is_speech = self.vad.is_speech(frame)
+            is_speech = self.vad.is_speech(frame, context=self.context)
             if is_speech:
                 if not self._is_listening:
                     self._is_listening = True
